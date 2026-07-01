@@ -19,6 +19,21 @@ for CODING, which actually writes things (no further decomposition). Results
 synthesize back up the same path. See `modelmesh/config.py` to change any of
 the model/effort assignments — nothing else needs to know.
 
+## Strength-aware routing
+
+In `--mode route`, subtasks aren't handed out blindly. Every decompose prompt
+carries `MODEL_STRENGTHS` from `config.py` — a plain-English description of
+what each provider is best at (Claude: architecture, multi-file refactoring,
+agentic multi-step work; Codex: algorithmically tricky logic, debugging,
+tests; Gemini: huge-context digestion, multimodal, fast broad sweeps) — and
+the decomposing agent assigns each subtask a `provider` along with its
+description. The dispatcher honors that assignment when the provider is
+configured at the child tier, and falls back to round-robin when the model
+didn't pick one (or picked something unavailable), so routing never becomes a
+failure mode. The knowledge lives in config as editable text, not in code:
+when your opinion of a model changes, edit the sentence, not the dispatcher.
+ENSEMBLE mode ignores hints by design — it exists to call everyone.
+
 ## Why this is buildable at all
 
 Claude Code, Codex CLI, and Gemini CLI all officially support running
@@ -145,7 +160,7 @@ before committing to one.
 ## Files
 
 - `modelmesh/tasks.py` — `Tier`, `Task`, `TaskResult`
-- `modelmesh/config.py` — the tier -> model/effort map, concurrency & fan-out limits
+- `modelmesh/config.py` — the tier -> model/effort map, `MODEL_STRENGTHS` routing knowledge, concurrency & fan-out limits
 - `modelmesh/agents.py` — subprocess wrappers for `claude` / `codex` / `gemini`, plus the dry-run mock
 - `modelmesh/prompts.py` — decompose/synthesize prompt templates + subtask parsing
 - `modelmesh/orchestrator.py` — the recursive dispatcher

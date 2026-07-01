@@ -35,6 +35,10 @@ class Task:
     parent_id: Optional[str] = None
     task_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     depth: int = 0
+    # Routing hint assigned by the parent's decompose call, based on
+    # MODEL_STRENGTHS. None (or a provider not configured at this tier)
+    # falls back to round-robin. Ignored in ENSEMBLE mode.
+    preferred_provider: Optional[str] = None
 
 
 @dataclass

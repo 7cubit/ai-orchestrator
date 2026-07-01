@@ -19,7 +19,7 @@ from typing import Optional
 from .agents import build_agent
 from .config import AgentSpec, DispatchMode, PROVIDER_CONCURRENCY, TIER_CONFIG
 from .prompts import (
-    CLAUDE_SUBTASK_SCHEMA,
+    SUBTASK_SCHEMA,
     decompose_prompt,
     parse_subtasks,
     synthesize_prompt,
@@ -70,9 +70,16 @@ class Orchestrator:
 
     # -- internals ------------------------------------------------------
 
-    def _pick_specs(self, tier: Tier) -> list[AgentSpec]:
+    def _pick_specs(self, tier: Tier, preferred: Optional[str] = None) -> list[AgentSpec]:
         if self.mode is DispatchMode.ENSEMBLE:
             return TIER_CONFIG[tier]
+        # Strength-aware routing: honor the provider the parent's decompose
+        # call assigned to this subtask, when that provider is configured at
+        # this tier. Otherwise fall back to round-robin.
+        if preferred:
+            for spec in TIER_CONFIG[tier]:
+                if spec.provider == preferred:
+                    return [spec]
         with self._rr_lock:
             return [next(self._round_robin[tier])]
 
@@ -104,7 +111,7 @@ class Orchestrator:
         )
 
     def _dispatch(self, task: Task) -> TaskResult:
-        specs = self._pick_specs(task.tier)
+        specs = self._pick_specs(task.tier, task.preferred_provider)
         lower = next_tier(task.tier)
 
         if lower is None:
@@ -113,12 +120,16 @@ class Orchestrator:
             return self._merge_leaf_results(task, results)
 
         # Non-leaf tier: ask the agent(s) to decompose, run children, synthesize.
+        # The decompose prompt carries MODEL_STRENGTHS for the providers
+        # configured at the child tier, so the decomposing agent routes each
+        # subtask to whichever model is strongest for it.
+        lower_providers = list(dict.fromkeys(s.provider for s in TIER_CONFIG[lower]))
         decompose_calls = [
             self._call(
                 spec,
                 task,
-                decompose_prompt(task, lower, self.max_fanout),
-                schema=CLAUDE_SUBTASK_SCHEMA,
+                decompose_prompt(task, lower, self.max_fanout, providers=lower_providers),
+                schema=SUBTASK_SCHEMA,
             )
             for spec in specs
         ]
@@ -129,7 +140,13 @@ class Orchestrator:
                 continue  # a failed decompose has no output worth parsing
             subtasks = parse_subtasks(call.output)[: self.max_fanout]
             child_tasks = [
-                Task(description=st, tier=lower, parent_id=task.task_id, depth=task.depth + 1)
+                Task(
+                    description=st.description,
+                    tier=lower,
+                    parent_id=task.task_id,
+                    depth=task.depth + 1,
+                    preferred_provider=st.provider,
+                )
                 for st in subtasks
             ]
             all_children.extend(self._run_children(child_tasks))

@@ -50,6 +50,26 @@ TIER_CONFIG: dict[Tier, list[AgentSpec]] = {
     ],
 }
 
+# What each provider is strongest at. This is routing knowledge, not code:
+# it's injected verbatim into every decompose prompt, so the decomposing
+# agent itself -- not a Python heuristic -- assigns each subtask to the
+# provider that fits it best (ROUTE mode only; ENSEMBLE always calls
+# everyone). Edit freely as your opinions about the models evolve.
+MODEL_STRENGTHS: dict[str, str] = {
+    "claude": (
+        "architecture and system design, multi-file refactoring, multi-step "
+        "agentic coding, careful instruction-following, prose and docs"
+    ),
+    "codex": (
+        "algorithmically tricky logic, debugging gnarly failures, math-heavy "
+        "problems, dense single-file implementations, test generation"
+    ),
+    "gemini": (
+        "very large context (whole-repo or long-document digestion), "
+        "multimodal inputs, fast broad sweeps, extraction and summarization"
+    ),
+}
+
 # How many *concurrent* subprocess calls each provider account is allowed
 # across the whole run. Subscriptions rate-limit per account, not per tier, so
 # fast fan-out at MAIN + SECOND + CODING can starve itself within minutes if
