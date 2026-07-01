@@ -1,0 +1,13 @@
+[project]
+name = "modelmesh"
+version = "0.1.0"
+description = "Hierarchical multi-model orchestration across Claude Code, Codex CLI, and Gemini CLI subscriptions"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+modelmesh = "modelmesh.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
