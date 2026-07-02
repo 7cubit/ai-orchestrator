@@ -75,6 +75,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                          help="Comma-separated subset of providers to use, "
                               "e.g. 'claude' if codex/agy aren't "
                               "installed yet")
+    parser.add_argument("--prefer", default=None, choices=["claude", "codex", "agy"],
+                         help="Bias routing toward one provider wherever it's "
+                              "configured at a tier (e.g. --prefer codex to "
+                              "lean on abundant ChatGPT quota). Overrides "
+                              "strength routing; failover still uses the "
+                              "others on timeout/error")
     parser.add_argument("--no-review", action="store_true",
                          help="Skip the orchestrator's post-synthesis quality/"
                               "hallucination review (and its retries)")
@@ -114,6 +120,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         max_retries=args.max_retries,
         project=project,
         providers=[p.strip() for p in args.providers.split(",")] if args.providers else None,
+        prefer=args.prefer,
     )
 
     if args.task is None:

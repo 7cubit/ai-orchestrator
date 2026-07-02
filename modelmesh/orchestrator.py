@@ -54,6 +54,7 @@ class Orchestrator:
         max_retries: int = MAX_QUALITY_RETRIES,
         project: Optional[str] = None,
         providers: Optional[list[str]] = None,
+        prefer: Optional[str] = None,
     ):
         self.mode = mode
         self.dry_run = dry_run
@@ -84,6 +85,19 @@ class Orchestrator:
                 self.tier_config[tier] = kept
         else:
             self.tier_config = TIER_CONFIG
+        # Bias routing toward one provider wherever it's configured at a tier
+        # (e.g. --prefer codex to lean on an abundant ChatGPT quota). It
+        # overrides the model's per-subtask routing but not failover, so the
+        # other providers still catch timeouts/errors. Tiers without this
+        # provider (e.g. ORCHESTRATOR, which is claude-only) are unaffected.
+        if prefer:
+            all_providers = {s.provider for specs in self.tier_config.values() for s in specs}
+            if prefer not in all_providers:
+                raise ValueError(
+                    f"--prefer {prefer!r}: not a configured provider "
+                    f"({sorted(all_providers)})"
+                )
+        self.prefer = prefer
         self._run_dir: Optional[str] = None
         self._round_robin = {
             tier: itertools.cycle(specs) for tier, specs in self.tier_config.items()
@@ -150,13 +164,17 @@ class Orchestrator:
     def _pick_specs(self, tier: Tier, preferred: Optional[str] = None) -> list[AgentSpec]:
         if self.mode is DispatchMode.ENSEMBLE:
             return self.tier_config[tier]
-        # Strength-aware routing: honor the provider the parent's decompose
-        # call assigned to this subtask, when that provider is configured at
-        # this tier. Otherwise fall back to round-robin.
-        if preferred:
-            for spec in self.tier_config[tier]:
-                if spec.provider == preferred:
-                    return [spec]
+        # Provider selection, in order of precedence:
+        #   1. --prefer (operator override, e.g. lean on ChatGPT quota)
+        #   2. the provider the parent's decompose assigned to this subtask
+        #      (strength-aware routing)
+        #   3. round-robin
+        # ...whichever is actually configured at this tier.
+        for choice in (self.prefer, preferred):
+            if choice:
+                for spec in self.tier_config[tier]:
+                    if spec.provider == choice:
+                        return [spec]
         with self._rr_lock:
             return [next(self._round_robin[tier])]
 

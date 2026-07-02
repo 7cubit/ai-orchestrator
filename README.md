@@ -38,6 +38,29 @@ failure mode. The knowledge lives in config as editable text, not in code:
 when the benchmarks move, edit the sentences, not the dispatcher. ENSEMBLE
 mode ignores hints by design — it exists to call everyone.
 
+## Leaning on one subscription's quota (`--prefer`)
+
+By default routing is strength/cost-aware, so a provider is only used when the
+work fits its profile — a summarize task goes to Gemini, a tricky-logic task
+to Codex, and so on. If one of your seats has abundant quota you'd rather
+spend (say a ChatGPT Plus plan with tokens to burn), `--prefer <provider>`
+biases routing toward it wherever it's configured at a tier:
+
+```bash
+modelmesh "Refactor the billing module and add tests" --prefer codex
+```
+
+- `--prefer codex` routes MAIN, SECOND, and CODING to the ChatGPT models
+  (gpt-5.5 at the planning tiers, gpt-5.4 at coding), overriding the
+  per-subtask strength routing. The ORCHESTRATOR tier is Fable-5-only, so it
+  is unaffected.
+- **Failover still applies:** if the preferred provider times out or errors,
+  the call falls over to the other providers as usual — so `--prefer` leans
+  on a seat without becoming a single point of failure.
+- Note which model is which tier: gpt-**5.5** only appears at MAIN/SECOND;
+  the coding tier (most of the volume) is gpt-**5.4**. `--prefer codex`
+  exercises both.
+
 ## Adaptive depth (why SECOND exists but isn't always used)
 
 Depth costs money: every extra tier adds a decompose call, a synthesis call,
