@@ -279,12 +279,13 @@ def _run_impl(
             raw=data,
         )
     except json.JSONDecodeError:
-        if json_optional:
-            return RunOutcome(output=stdout, success=proc.returncode == 0)
-        return RunOutcome(
-            output=stdout, success=proc.returncode == 0,
-            error=None if proc.returncode == 0 else proc.stderr.strip(),
+        ok = proc.returncode == 0
+        # Always carry a reason on failure -- a bare success=False renders
+        # as "FAILED (None)" in progress lines and failover chains.
+        err = None if ok else (
+            proc.stderr.strip() or f"exit {proc.returncode}, non-JSON output"
         )
+        return RunOutcome(output=stdout, success=ok, error=err)
 
 
 def build_agent(
