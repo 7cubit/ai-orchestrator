@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Optional
 
@@ -52,6 +53,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--workdir", default=None,
                          help="Base directory for per-call agent workdirs "
                               "(default: a fresh temp directory per run)")
+    parser.add_argument("--project", default=None,
+                         help="Path to a real repo to work in: every agent "
+                              "call runs there instead of an isolated scratch "
+                              "dir (avoid --parallel-children with this)")
+    parser.add_argument("--providers", default=None,
+                         help="Comma-separated subset of providers to use, "
+                              "e.g. 'claude' if codex/gemini aren't "
+                              "installed yet")
     parser.add_argument("--no-review", action="store_true",
                          help="Skip the orchestrator's post-synthesis quality/"
                               "hallucination review (and its retries)")
@@ -61,6 +70,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--json", action="store_true",
                          help="Print the final result tree as JSON instead of text")
     args = parser.parse_args(argv)
+
+    project = None
+    if args.project:
+        project = os.path.abspath(os.path.expanduser(args.project))
+        if not os.path.isdir(project):
+            parser.error(f"--project: no such directory: {project}")
+        if args.parallel_children:
+            print(
+                "warning: --project with --parallel-children means concurrent "
+                "agents share one working tree; their edits can collide",
+                file=sys.stderr,
+            )
 
     orchestrator = Orchestrator(
         mode=DispatchMode(args.mode),
@@ -72,6 +93,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         workdir=args.workdir,
         review=not args.no_review,
         max_retries=args.max_retries,
+        project=project,
+        providers=[p.strip() for p in args.providers.split(",")] if args.providers else None,
     )
     result = orchestrator.run(args.task)
 

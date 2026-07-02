@@ -106,6 +106,29 @@ same as "unlimited": see **Rate limits** below before you turn this loose.
    need all three working to start; agents.py reports a clear "not found /
    not authenticated" error per-provider rather than crashing the run.
 
+## Running against a real repo
+
+By default every agent call runs in its own scratch directory, which is the
+safe mode for generative tasks. For actual terminal coding — "fix the bugs in
+this project", "audit this codebase" — point the run at the repo:
+
+```bash
+modelmesh "Fix the failing auth tests and any bugs you find on the way" \
+    --project ~/code/myapp --providers claude
+
+modelmesh "Produce a security audit report of this codebase" \
+    --project ~/code/myapp --max-retries 2
+```
+
+- `--project` runs every agent with the repo as its working directory, so
+  coding-tier agents edit real files. Work on a branch and review the diff
+  afterwards — these agents run unattended with permissions bypassed. Avoid
+  `--parallel-children` in this mode (agents would share one working tree);
+  the default is sequential anyway.
+- `--providers` restricts the run to the CLIs you actually have installed
+  and authenticated, without editing `TIER_CONFIG`. Start with
+  `--providers claude`, add `codex`/`gemini` as you set them up.
+
 ## Rate limits are the real constraint here, not the code
 
 The code above is the easy part — maybe a day to get right, plus ongoing

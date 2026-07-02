@@ -50,6 +50,8 @@ class Orchestrator:
         workdir: Optional[str] = None,
         review: bool = True,
         max_retries: int = MAX_QUALITY_RETRIES,
+        project: Optional[str] = None,
+        providers: Optional[list[str]] = None,
     ):
         self.mode = mode
         self.dry_run = dry_run
@@ -60,9 +62,26 @@ class Orchestrator:
         self.workdir = workdir
         self.review = review
         self.max_retries = max_retries
+        # A real repo to work in: every agent call runs with this as its cwd
+        # instead of an isolated scratch dir. Mind --parallel-children here --
+        # concurrent agents then share one working tree.
+        self.project = project
+        # Restrict the run to a subset of providers (e.g. only the CLIs you
+        # actually have installed/authenticated) without editing TIER_CONFIG.
+        if providers:
+            self.tier_config: dict[Tier, list[AgentSpec]] = {}
+            for tier, specs in TIER_CONFIG.items():
+                kept = [s for s in specs if s.provider in providers]
+                if not kept:
+                    raise ValueError(
+                        f"providers {providers} leave no model at tier '{tier.value}'"
+                    )
+                self.tier_config[tier] = kept
+        else:
+            self.tier_config = TIER_CONFIG
         self._run_dir: Optional[str] = None
         self._round_robin = {
-            tier: itertools.cycle(specs) for tier, specs in TIER_CONFIG.items()
+            tier: itertools.cycle(specs) for tier, specs in self.tier_config.items()
         }
         # itertools.cycle isn't documented thread-safe; guard it so
         # --parallel-children can't hand two children the same spec.
@@ -107,7 +126,7 @@ class Orchestrator:
         return result
 
     def _review(self, big_task: str, result: TaskResult) -> dict:
-        spec = TIER_CONFIG[Tier.ORCHESTRATOR][0]
+        spec = self.tier_config[Tier.ORCHESTRATOR][0]
         call = self._call(
             spec, result.task, review_prompt(big_task, result.output),
             schema=REVIEW_SCHEMA,
@@ -125,12 +144,12 @@ class Orchestrator:
 
     def _pick_specs(self, tier: Tier, preferred: Optional[str] = None) -> list[AgentSpec]:
         if self.mode is DispatchMode.ENSEMBLE:
-            return TIER_CONFIG[tier]
+            return self.tier_config[tier]
         # Strength-aware routing: honor the provider the parent's decompose
         # call assigned to this subtask, when that provider is configured at
         # this tier. Otherwise fall back to round-robin.
         if preferred:
-            for spec in TIER_CONFIG[tier]:
+            for spec in self.tier_config[tier]:
                 if spec.provider == preferred:
                     return [spec]
         with self._rr_lock:
@@ -139,10 +158,13 @@ class Orchestrator:
     def _call(
         self, spec: AgentSpec, task: Task, prompt: str, schema: Optional[dict] = None
     ) -> TaskResult:
-        call_dir = os.path.join(
-            self._run_dir, f"{task.tier.value}-{task.task_id}-{spec.provider}"
-        )
-        os.makedirs(call_dir, exist_ok=True)
+        if self.project:
+            call_dir = self.project
+        else:
+            call_dir = os.path.join(
+                self._run_dir, f"{task.tier.value}-{task.task_id}-{spec.provider}"
+            )
+            os.makedirs(call_dir, exist_ok=True)
         agent = build_agent(
             spec,
             dry_run=self.dry_run,
@@ -176,7 +198,7 @@ class Orchestrator:
         # The decompose prompt carries MODEL_STRENGTHS for the providers
         # configured at the child tier, so the decomposing agent routes each
         # subtask to whichever model is strongest for it.
-        lower_providers = list(dict.fromkeys(s.provider for s in TIER_CONFIG[lower]))
+        lower_providers = list(dict.fromkeys(s.provider for s in self.tier_config[lower]))
         decompose_calls = [
             self._call(
                 spec,
