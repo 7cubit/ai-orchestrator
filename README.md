@@ -167,6 +167,31 @@ cp claude-skill/SKILL.md ~/.claude/skills/modelmesh/SKILL.md
    need all three working to start; agents.py reports a clear "not found /
    not authenticated" error per-provider rather than crashing the run.
 
+## Using it from Claude Code (`/modelmesh`)
+
+Once the skill is installed (see Setup), you don't run the CLI by hand — you
+drive it from a Claude Code session. Open `claude` inside the repo you want to
+work on and invoke the skill with your task:
+
+```
+/modelmesh fix the failing tests --prefer codex
+```
+
+Claude *interprets* that line (it isn't a raw shell pass-through), so:
+
+- The task text and any flags (`--prefer codex`, `--mode ensemble`, …) are
+  understood and passed through to the real `modelmesh` command.
+- Plain English works too — `/modelmesh fix the failing tests, use my GPT
+  quota` gets the same `--prefer codex`.
+- Claude adds the safe scaffolding for you: it runs in the repo you're in,
+  branches first when the task writes files, launches in the background,
+  verifies the result, and reports back — so you don't have to remember
+  `--project`, `--timeout`, or to check the diff.
+
+The skill only fires for genuinely orchestrator-sized work; ordinary
+questions and small edits are answered by the Claude session directly, not
+by spinning up the whole tree.
+
 ## Working directory: it behaves like claude/codex/agy
 
 The project is wherever you're standing. Open a terminal inside a repo (or a
