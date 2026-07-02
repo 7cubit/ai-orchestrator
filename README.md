@@ -162,6 +162,13 @@ your Claude, ChatGPT, and Google seats are independent accounts. So:
 which call is sitting on the clock. stdout is untouched, so `--json` output
 stays parseable.
 
+Independently of `--verbose`, every run writes the same progress lines
+(timestamped, plus the task and final status) to a durable per-run log at
+`~/.local/state/modelmesh/logs/run-<stamp>-<pid>.log`, announced on stderr
+at launch. Backgrounded runs often get their shell output redirected into
+a temp path that may not outlive the session — the run log means
+visibility never depends on where the caller pointed stderr.
+
 Separately, decompose/synthesize/review calls are single-shot text→JSON
 work, so they run under a tighter budget than real coding work:
 `REASONING_TIMEOUT_SECONDS` (240s) and `REASONING_MAX_TURNS` (3) in

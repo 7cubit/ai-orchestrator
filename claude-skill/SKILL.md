@@ -52,6 +52,11 @@ progress instead of silence:
 modelmesh "<one self-contained task description>" --verbose [flags]
 ```
 
+Every run also writes its own durable progress log to
+`~/.local/state/modelmesh/logs/run-<stamp>-<pid>.log` (path printed on
+stderr at launch) regardless of --verbose — if the shell's output file is
+lost (e.g. it lived in a purged session scratchpad), read that instead.
+
 Clarify-first behavior: a pre-flight triage call may find the task
 ambiguous. Backgrounded runs never block on questions — they adopt stated
 default assumptions and print them to stderr as "proceeding under explicit

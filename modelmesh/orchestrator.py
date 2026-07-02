@@ -92,6 +92,9 @@ class Orchestrator:
         # headless -> adopt the model's stated default assumptions and
         # surface them. Never blocks or fails a run; --no-clarify skips it.
         self.clarify = clarify
+        # Durable per-run progress log (see _open_run_log).
+        self._log_fh = None
+        self._log_lock = Lock()
         self.review = review
         self.max_retries = max_retries
         # A real repo to work in: every agent call runs with this as its cwd
@@ -146,7 +149,24 @@ class Orchestrator:
         self._deadline = (
             time.monotonic() + self.run_timeout if self.run_timeout else None
         )
+        self._open_run_log(big_task)
+        try:
+            result = self._run_task(big_task)
+            self._log(
+                f"run finished: success={result.success}"
+                + (f" error={result.error}" if result.error else "")
+            )
+            return result
+        finally:
+            if self._log_fh is not None:
+                with self._log_lock:
+                    try:
+                        self._log_fh.close()
+                    except OSError:
+                        pass
+                    self._log_fh = None
 
+    def _run_task(self, big_task: str) -> TaskResult:
         # Pin down intent before spending the whole tree on a guess. The
         # clarified task (with operator answers or adopted assumptions
         # folded in) is what every tier -- including review -- works from.
@@ -267,8 +287,41 @@ class Orchestrator:
 
     # -- internals ------------------------------------------------------
 
+    def _open_run_log(self, big_task: str) -> None:
+        """Open a durable per-run progress log under
+        ~/.local/state/modelmesh/logs/, independent of wherever the caller
+        pointed stdout/stderr. Backgrounded runs often log into a session
+        scratchpad that can be purged mid-run -- visibility shouldn't die
+        with it. Every _progress line lands here even without --verbose.
+        Failure to open is never fatal."""
+        try:
+            log_dir = os.path.expanduser(
+                os.path.join("~", ".local", "state", "modelmesh", "logs"))
+            os.makedirs(log_dir, exist_ok=True)
+            path = os.path.join(
+                log_dir,
+                f"run-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.log",
+            )
+            self._log_fh = open(path, "a", encoding="utf-8")
+            print(f"modelmesh: run log: {path}", file=sys.stderr, flush=True)
+            self._log("task: " + " ".join(big_task.split())[:400])
+        except OSError:
+            self._log_fh = None
+
+    def _log(self, message: str) -> None:
+        if self._log_fh is None:
+            return
+        with self._log_lock:
+            try:
+                self._log_fh.write(f"{time.strftime('%H:%M:%S')} {message}\n")
+                self._log_fh.flush()
+            except OSError:
+                self._log_fh = None
+
     def _progress(self, message: str) -> None:
-        # stderr, so --json output on stdout stays parseable.
+        # Always to the durable run log; to stderr only with --verbose
+        # (stderr, so --json output on stdout stays parseable).
+        self._log(message)
         if self.verbose:
             print(f"modelmesh: {message}", file=sys.stderr, flush=True)
 
