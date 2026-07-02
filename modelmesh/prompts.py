@@ -135,6 +135,27 @@ def retry_task_description(original_task: str, issues: list[str]) -> str:
     )
 
 
+# Appended to every leaf (coding-tier) prompt. Coding agents run unattended
+# with permission prompts bypassed, so if their working directory vanishes
+# mid-session (a purged temp dir, a removed worktree) nothing OS-level stops
+# them from wandering into another checkout -- this happened once: an agent
+# whose worktree was deleted fell back into the operator's main checkout and
+# committed there. The guardrail targets that exact escape.
+WORKDIR_GUARDRAIL = (
+    "\n\nOperating constraint: do all work strictly inside your current "
+    "working directory. If that directory is missing, disappears, or "
+    "becomes unavailable at any point, stop immediately and report the "
+    "failure -- do not continue in, check out branches in, or commit to "
+    "any other directory or checkout."
+)
+
+
+def leaf_prompt(task: Task) -> str:
+    """The prompt handed to a coding-tier agent: the subtask description
+    plus the stay-in-your-workdir guardrail."""
+    return task.description + WORKDIR_GUARDRAIL
+
+
 def synthesize_prompt(task: Task, children: list[TaskResult]) -> str:
     child_block = "\n\n".join(
         f"--- Subtask {i + 1} ({c.provider}:{c.model}) ---\n{c.output}"

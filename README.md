@@ -300,6 +300,15 @@ OS-enforced, and only for writes). A self-audit
   subtask beginning with `-` can no longer be reparsed as a flag (the former
   argument-injection gap). Repo/LLM text still flows between agent prompts
   unsanitized — a known tradeoff of the decompose→synthesize design.
+- **Run repo-mutating tasks from a durable directory, not a temp path.** A
+  workdir that gets purged mid-run (session scratchpads, `/tmp`) leaves a
+  permission-bypassed agent stranded — and one such agent once fell back
+  into the operator's main checkout and committed there. Three guardrails
+  now target this: a vanished workdir fails the call cleanly into the
+  failover path instead of reaching the vendor CLI; every coding-tier
+  prompt carries a stay-in-your-workdir constraint; and `--project` under a
+  temp/scratchpad path is refused unless you pass `--allow-temp-project`.
+  For repo runs, a dedicated git worktree is the right durable home.
 
 ## Rate limits are the real constraint here, not the code
 

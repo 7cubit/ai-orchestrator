@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from typing import Optional
 
 from .config import DispatchMode, MAX_FANOUT, MAX_QUALITY_RETRIES
@@ -43,6 +44,23 @@ def _to_dict(r: TaskResult) -> dict:
     }
 
 
+def _is_purgeable(path: str) -> bool:
+    """True when `path` lives somewhere the OS or a harness may delete out
+    from under a running agent: the system temp tree, or a session-scoped
+    scratchpad. A --project run there once lost its worktree mid-run and a
+    coding agent fell back into the operator's main checkout."""
+    real = os.path.realpath(path)
+    temp_roots = {
+        os.path.realpath(tempfile.gettempdir()),
+        "/tmp", "/private/tmp", "/var/folders", "/private/var/folders",
+    }
+    for root in temp_roots:
+        root = os.path.realpath(root)
+        if real == root or real.startswith(root + os.sep):
+            return True
+    return "scratchpad" in real.split(os.sep)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="modelmesh", description=__doc__)
     parser.add_argument("task", nargs="?", default=None,
@@ -67,6 +85,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                          help="Repo to work in (default: the current "
                               "directory, like claude/codex/agy). Pass a "
                               "path to target another repo without cd-ing")
+    parser.add_argument("--allow-temp-project", action="store_true",
+                         help="Allow the project to live under a temp/"
+                              "scratchpad path that may be purged mid-run "
+                              "(refused by default: agents whose workdir "
+                              "vanishes can escape into other checkouts)")
     parser.add_argument("--isolated", action="store_true",
                          help="Don't touch the current directory: run every "
                               "agent in its own scratch dir instead (for "
@@ -100,6 +123,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         project = os.path.abspath(os.path.expanduser(args.project or os.getcwd()))
         if not os.path.isdir(project):
             parser.error(f"--project: no such directory: {project}")
+        if _is_purgeable(project) and not args.allow_temp_project:
+            parser.error(
+                f"project {project} is under a temp/scratchpad path that can "
+                f"be purged mid-run, letting agents escape into other "
+                f"checkouts. Use a durable location (e.g. a git worktree "
+                f"under the repo), or pass --allow-temp-project to override."
+            )
         if args.parallel_children:
             print(
                 "warning: agents share one working tree under "

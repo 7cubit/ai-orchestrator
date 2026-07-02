@@ -181,6 +181,15 @@ def _run(
     cwd: Optional[str] = None,
     stdin_input: Optional[str] = None,
 ) -> RunOutcome:
+    # A workdir can be deleted out from under a run (a purged temp dir, a
+    # removed worktree). Fail this call cleanly -- which routes into the
+    # normal failover / branch-failure path -- rather than letting a vendor
+    # CLI improvise a fallback directory and operate somewhere it shouldn't.
+    if cwd is not None and not os.path.isdir(cwd):
+        return RunOutcome(
+            output="", success=False,
+            error=f"working directory no longer exists: {cwd}",
+        )
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd,

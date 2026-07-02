@@ -30,6 +30,7 @@ from .prompts import (
     REVIEW_SCHEMA,
     SUBTASK_SCHEMA,
     decompose_prompt,
+    leaf_prompt,
     parse_review,
     parse_subtasks,
     retry_task_description,
@@ -254,12 +255,12 @@ class Orchestrator:
             # CODING tier: leaf. No decomposition, just do the work.
             if ensemble:
                 results = [
-                    self._call(spec, task, task.description)
+                    self._call(spec, task, leaf_prompt(task))
                     for spec in self.tier_config[task.tier]
                 ]
                 return self._merge_leaf_results(task, results)
             # ROUTE: one provider, with failover to another on timeout/error.
-            return self._call_with_failover(task, task.description, task.preferred_provider)
+            return self._call_with_failover(task, leaf_prompt(task), task.preferred_provider)
 
         # Non-leaf tier: ask the agent(s) to decompose, run children, synthesize.
         # The decompose prompt carries MODEL_PROFILES for the providers
