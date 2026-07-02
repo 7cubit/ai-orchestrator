@@ -27,6 +27,7 @@ from .config import (
     PROVIDER_CONCURRENCY,
     REASONING_MAX_TURNS,
     REASONING_TIMEOUT_SECONDS,
+    RUN_TIMEOUT_SECONDS,
     SPEED_RANK,
     TIER_CONFIG,
 )
@@ -61,6 +62,7 @@ class Orchestrator:
         providers: Optional[list[str]] = None,
         prefer: Optional[str] = None,
         verbose: bool = False,
+        run_timeout: int = RUN_TIMEOUT_SECONDS,
     ):
         self.mode = mode
         self.dry_run = dry_run
@@ -75,6 +77,12 @@ class Orchestrator:
         # Live progress: one line per call start/finish on stderr, so a
         # 20-minute run is distinguishable from a hung one.
         self.verbose = verbose
+        # Aggregate wall-clock budget: past the deadline, calls not yet
+        # started fail fast instead of spawning (0 = unlimited). In-flight
+        # subprocess calls run to their own --timeout; partial results
+        # propagate up through the normal failure path.
+        self.run_timeout = run_timeout
+        self._deadline: Optional[float] = None
         self.review = review
         self.max_retries = max_retries
         # A real repo to work in: every agent call runs with this as its cwd
@@ -126,6 +134,9 @@ class Orchestrator:
         # agents never share (or trash) the caller's working directory.
         self._run_dir = self.workdir or tempfile.mkdtemp(prefix="modelmesh-")
         os.makedirs(self._run_dir, exist_ok=True)
+        self._deadline = (
+            time.monotonic() + self.run_timeout if self.run_timeout else None
+        )
 
         # Quality loop: dispatch, have the orchestrator model review the
         # integrated result for hallucinated/unsupported content and gaps,
@@ -142,6 +153,15 @@ class Orchestrator:
             review = self._review(big_task, result)
             result.review = {**review, "attempts": attempt}
             if review["verdict"] == "accept":
+                return result
+            if self._deadline is not None and time.monotonic() > self._deadline:
+                result.success = False
+                result.error = (
+                    f"review requested a retry, but the run deadline of "
+                    f"{self.run_timeout}s is exceeded; returning the "
+                    f"rejected result: "
+                    + ("; ".join(review["issues"]) or "quality below the bar")
+                )
                 return result
             description = retry_task_description(big_task, review["issues"])
         # Retries exhausted with the reviewer still unconvinced: surface
@@ -234,6 +254,18 @@ class Orchestrator:
         self, spec: AgentSpec, task: Task, prompt: str,
         schema: Optional[dict] = None, *, kind: str = "work",
     ) -> TaskResult:
+        # Run deadline: fail fast instead of spawning. The normal failure
+        # propagation carries the partial results up honestly.
+        if self._deadline is not None and time.monotonic() > self._deadline:
+            self._progress(
+                f"[{task.tier.value}] {spec.provider}:{spec.model} {kind} "
+                f"skipped (run deadline of {self.run_timeout}s exceeded)"
+            )
+            return TaskResult(
+                task=task, provider=spec.provider, model=spec.model,
+                effort=spec.effort, output="", success=False,
+                error=f"not started: run deadline of {self.run_timeout}s exceeded",
+            )
         if self.project:
             call_dir = self.project
         else:
@@ -252,6 +284,9 @@ class Orchestrator:
             timeout=min(self.timeout, REASONING_TIMEOUT_SECONDS) if reasoning else self.timeout,
             max_turns=min(self.max_turns, REASONING_MAX_TURNS) if reasoning else self.max_turns,
             workdir=call_dir,
+            # Least privilege (MM-01/MM-02): reasoning calls run without the
+            # vendor permission bypass; only leaf coding work is unattended.
+            restricted=reasoning,
         )
         label = f"[{task.tier.value}] {spec.provider}:{spec.model} {kind}"
         with self._sems[spec.provider]:

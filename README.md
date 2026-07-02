@@ -299,20 +299,40 @@ review gate can only reject what the prompt lets it measure.
 
 ## Security model & known limitations
 
-modelmesh runs vendor CLIs unattended with their permission prompts disabled
-(`claude --permission-mode bypassPermissions`, `agy
---dangerously-skip-permissions`; only `codex --sandbox workspace-write` is
-OS-enforced, and only for writes). A self-audit
-(`docs/SECURITY_AUDIT.md`) documents the consequences; the load-bearing ones:
+modelmesh runs coding-tier agents unattended with their permission prompts
+disabled (`claude --permission-mode bypassPermissions`, `agy
+--dangerously-skip-permissions`, `codex --sandbox workspace-write`). A
+self-audit (`docs/SECURITY_AUDIT.md`) documents the consequences; the
+hardening it drove, and what still stands:
 
-- **The per-call working directory is a starting cwd, not a sandbox.** With
-  permissions bypassed, `claude` and `agy` agents can read/write outside it.
-  Treat every run as "this could touch anything the invoking user can" —
-  run against a branch, review the diff, and don't point `--project` at a
+- **Least privilege by call kind (MM-01/02, MM-07).** Only leaf coding work
+  runs with the permission bypass. Decompose/synthesize/review calls run
+  restricted — claude in default mode (reads work headless, writes/bash are
+  denied), `codex --sandbox read-only`, `agy --sandbox` — verified live
+  against all three CLIs.
+- **Agents get an allowlisted environment, not your shell's (MM-08).**
+  `ENV_ALLOWLIST` in `config.py` passes PATH/HOME/locale/proxy vars only;
+  credentials like `ANTHROPIC_API_KEY` are stripped (verified with a canary
+  secret). All three CLIs authenticate from their own state under HOME. If
+  you want API-key burst billing, add the key to the allowlist deliberately.
+- **The per-call working directory is still a starting cwd, not a sandbox,
+  for the coding tier.** A bypassed coding agent can read/write outside it.
+  Run against a branch, review the diff, and don't point `--project` at a
   tree you can't afford an agent to edit.
-- **Don't point `--project` at modelmesh's own source.** It's an editable
-  install, so the running code *is* the checkout; an agent editing it plants
-  changes that run on the next invocation.
+- **`--project` refuses modelmesh's own source tree (MM-03/09).** It's an
+  editable install, so the running code *is* the checkout. The resolved
+  (symlink-free) project path is rejected if it is, contains, or sits inside
+  the package tree (`--dry-run` is exempt — it spawns nothing).
+- **Cross-agent text is fenced as untrusted data (MM-04).** Child outputs,
+  integrated results, and reviewer issues are wrapped in `<untrusted_data>`
+  tags with a standing do-not-obey directive, closing tags in content are
+  neutralized, and each child is size-capped in synthesis prompts. This
+  mitigates prompt injection; it does not eliminate it.
+- **Volume is bounded (MM-06/14).** Per-call output is capped at
+  `MAX_OUTPUT_CHARS` (head+tail kept, truncation marked), and
+  `--run-timeout` (default 3600s, 0 = off) is an aggregate wall-clock
+  budget: past it no new agent calls start and partial results come back as
+  an honest failure.
 - **Prompts now go to the CLIs via stdin, not argv**, so a model-generated
   subtask beginning with `-` can no longer be reparsed as a flag (the former
   argument-injection gap). Repo/LLM text still flows between agent prompts

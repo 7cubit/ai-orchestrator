@@ -147,6 +147,36 @@ DEFAULT_MAX_TURNS = 15
 REASONING_TIMEOUT_SECONDS = 240
 REASONING_MAX_TURNS = 3
 
+# Aggregate wall-clock budget for a whole run (audit MM-06's last gap: no
+# run-level deadline existed, only per-call timeouts). Past the deadline no
+# new agent calls start -- in-flight calls finish, everything not yet started
+# fails fast with a "deadline exceeded" error, and partial results propagate
+# up honestly. --run-timeout overrides; 0 disables.
+RUN_TIMEOUT_SECONDS = 3600
+
+# MM-08: spawned agents get this env allowlist instead of the full parent
+# environment, so credentials in the operator's shell (ANTHROPIC_API_KEY,
+# cloud tokens, ...) are never visible to permission-bypassed agents. All
+# three CLIs authenticate from their own state under HOME, verified live. If
+# you *want* API-key burst billing, add the key name here deliberately.
+ENV_ALLOWLIST = [
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM",
+    "LANG", "LC_ALL", "TZ",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy",
+]
+
+# MM-14: caps on text volume, so one agent dumping a huge transcript can't
+# blow out memory or the parent tier's context window. Truncation keeps head
+# and tail (the end usually carries the conclusion).
+MAX_OUTPUT_CHARS = 200_000        # per-call output cap, applied in agents.py
+SYNTHESIS_CHILD_CHARS = 40_000    # per-child cap inside a synthesis prompt
+
+# MM-11: effort strings are interpolated into a codex -c config override;
+# validate against known tokens so the invariant "effort is always a static
+# config literal" isn't one refactor away from an injection.
+ALLOWED_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+
 # After synthesis, the orchestrator model reviews the integrated result
 # against the original task (checking specifically for hallucinated or
 # unsupported content). A "retry" verdict re-dispatches the whole tree with

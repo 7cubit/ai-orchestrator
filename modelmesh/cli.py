@@ -15,6 +15,7 @@ from .config import (
     DispatchMode,
     MAX_FANOUT,
     MAX_QUALITY_RETRIES,
+    RUN_TIMEOUT_SECONDS,
 )
 from .orchestrator import Orchestrator
 from .tasks import TaskResult
@@ -82,6 +83,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--parallel-children", action="store_true",
                          help="Fan out child tasks concurrently (mind provider rate limits)")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--run-timeout", type=int, default=RUN_TIMEOUT_SECONDS,
+                         help="Aggregate wall-clock budget for the whole run "
+                              "in seconds; past it, no new agent calls start "
+                              "and partial results are returned as a failure "
+                              "(0 = unlimited)")
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS,
                          help="Max agent turns per Claude Code call")
     parser.add_argument("--verbose", "-v", action="store_true",
@@ -129,10 +135,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     project = None
     if not args.isolated:
         # Like claude/codex/agy: the project is wherever you're standing,
-        # unless --project points somewhere else.
-        project = os.path.abspath(os.path.expanduser(args.project or os.getcwd()))
+        # unless --project points somewhere else. realpath (MM-09), so a
+        # symlink can't route around the containment checks below.
+        project = os.path.realpath(os.path.expanduser(args.project or os.getcwd()))
         if not os.path.isdir(project):
             parser.error(f"--project: no such directory: {project}")
+        # MM-03: never point agents at modelmesh's own source. This is an
+        # editable install, so the running code IS the checkout -- an agent
+        # editing it plants changes that execute on the next invocation.
+        # Refuse the package tree itself, anything inside it, and any
+        # ancestor that contains it.
+        # (--dry-run is exempt: it spawns no agents, and the README's first
+        # smoke test runs from inside this very repo.)
+        pkg_root = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+        proj_parts, pkg_parts = project.split(os.sep), pkg_root.split(os.sep)
+        shorter = min(len(proj_parts), len(pkg_parts))
+        if proj_parts[:shorter] == pkg_parts[:shorter] and not args.dry_run:
+            parser.error(
+                f"project {project} contains (or is inside) modelmesh's own "
+                f"source tree at {pkg_root}. A permission-bypassed agent "
+                f"there could rewrite the orchestrator itself (audit MM-03). "
+                f"Point --project elsewhere, or work on a copy."
+            )
         if _is_purgeable(project) and not args.allow_temp_project:
             parser.error(
                 f"project {project} is under a temp/scratchpad path that can "
@@ -162,6 +186,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         providers=[p.strip() for p in args.providers.split(",")] if args.providers else None,
         prefer=args.prefer,
         verbose=args.verbose,
+        run_timeout=args.run_timeout,
     )
 
     if args.task is None:
