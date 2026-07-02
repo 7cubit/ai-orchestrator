@@ -1,10 +1,10 @@
 """Thin subprocess wrappers around the three vendor CLIs.
 
 Each wrapper shells out to an *already installed, already logged-in* CLI --
-`claude`, `codex`, or `gemini` -- using the subscription session created by
-`claude login` / `codex` (ChatGPT sign-in) / `gemini` (Google sign-in). None
-of this talks to a pay-per-token API key; it rides the same seat you already
-pay for.
+`claude`, `codex`, or `agy` (Antigravity) -- using the subscription session
+created by `claude login` / `codex` (ChatGPT sign-in) / `agy` (Google
+sign-in). None of this talks to a pay-per-token API key; it rides the same
+seat you already pay for.
 
 Flags below are accurate as of the docs pulled while building this scaffold,
 but all three CLIs ship updates fast. Anywhere you see `# VERIFY:` is worth
@@ -106,23 +106,28 @@ class CodexAgent(Agent):
                     cwd=self.workdir)
 
 
-class GeminiAgent(Agent):
-    """Wraps `gemini -p` -- Gemini CLI's headless mode."""
+class AgyAgent(Agent):
+    """Wraps `agy --print` -- the Antigravity CLI's headless mode, serving
+    Gemini models off an Antigravity subscription.
+
+    Flags verified against agy 1.0.14: the model string is exactly what
+    `agy models` prints (e.g. "Gemini 3.1 Pro (High)"), with the reasoning
+    level baked in -- so spec.effort documents intent rather than adding a
+    flag. Output is plain text (no JSON output flag), so parsing is
+    best-effort and `schema` is prompt-only here."""
 
     def run(self, prompt: str, schema: Optional[dict] = None) -> RunOutcome:
-        if not shutil.which("gemini"):
-            return self._missing_binary("gemini")
+        if not shutil.which("agy"):
+            return self._missing_binary("agy")
         cmd = [
-            "gemini", "-p", prompt,
-            "-m", self.spec.model,
-            "--output-format", "json",
+            "agy", "--print", prompt,
+            "--model", self.spec.model,
+            "--print-timeout", f"{self.timeout}s",
+            # unattended, confined to its own workdir
+            "--dangerously-skip-permissions",
         ]
-        # VERIFY: there's no confirmed per-call CLI flag for thinking level
-        # (low/medium/high) as of this writing. Until one is, "effort" on this
-        # tier documents intent more than it enforces it -- set thinking level
-        # via a per-profile ~/.gemini/settings.json if you need it locked in.
-        # (`schema` is Claude-only for now; JSON is requested in the prompt.)
-        return _run(cmd, self.timeout, result_key="response", cwd=self.workdir)
+        return _run(cmd, self.timeout, result_key="response", json_optional=True,
+                    cwd=self.workdir)
 
 
 class MockAgent(Agent):
@@ -202,7 +207,7 @@ def build_agent(
     provider_map = {
         "claude": ClaudeCodeAgent,
         "codex": CodexAgent,
-        "gemini": GeminiAgent,
+        "agy": AgyAgent,
     }
     return provider_map[spec.provider](
         spec, timeout=timeout, max_turns=max_turns, workdir=workdir

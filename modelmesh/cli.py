@@ -59,7 +59,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                               "dir (avoid --parallel-children with this)")
     parser.add_argument("--providers", default=None,
                          help="Comma-separated subset of providers to use, "
-                              "e.g. 'claude' if codex/gemini aren't "
+                              "e.g. 'claude' if codex/agy aren't "
                               "installed yet")
     parser.add_argument("--no-review", action="store_true",
                          help="Skip the orchestrator's post-synthesis quality/"

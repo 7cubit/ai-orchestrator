@@ -15,7 +15,7 @@ from .tasks import Tier
 
 @dataclass(frozen=True)
 class AgentSpec:
-    provider: str  # "claude" | "codex" | "gemini"
+    provider: str  # "claude" | "codex" | "agy"
     model: str      # the CLI-facing model id/alias
     effort: str      # provider-specific reasoning/effort/thinking level
 
@@ -36,19 +36,22 @@ TIER_CONFIG: dict[Tier, list[AgentSpec]] = {
     Tier.MAIN: [
         AgentSpec("claude", "claude-opus-4-8", "max"),
         AgentSpec("codex", "gpt-5.5", "xhigh"),
-        AgentSpec("gemini", "gemini-3.1-pro", "high"),
+        AgentSpec("agy", "Gemini 3.1 Pro (High)", "high"),
     ],
     Tier.SECOND: [
         AgentSpec("claude", "claude-opus-4-8", "high"),
         AgentSpec("codex", "gpt-5.5", "high"),
-        AgentSpec("gemini", "gemini-3.1-pro", "high"),
+        AgentSpec("agy", "Gemini 3.1 Pro (High)", "high"),
     ],
     Tier.CODING: [
         AgentSpec("claude", "claude-sonnet-5", "max"),
         AgentSpec("codex", "gpt-5.4", "xhigh"),
-        AgentSpec("gemini", "gemini-3.5-flash", "high"),
+        AgentSpec("agy", "Gemini 3.5 Flash (High)", "high"),
     ],
 }
+# Note on agy (Antigravity CLI): the reasoning level is baked into the model
+# string -- "Gemini 3.1 Pro (High)" -- exactly as `agy models` lists it, so
+# the effort field above documents intent rather than adding a flag.
 
 @dataclass(frozen=True)
 class ModelProfile:
@@ -93,12 +96,13 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         ),
         cost="medium (GPT-5.4 at the coding tier)",
     ),
-    "gemini": ModelProfile(
+    "agy": ModelProfile(
         strengths=(
-            "very large context (whole-repo or long-document digestion), "
-            "multimodal inputs, fast broad sweeps, extraction and "
-            "summarization; Flash is the cheapest, fastest coding-tier "
-            "option for mechanical or repetitive edits"
+            "Gemini models via the Antigravity seat: very large context "
+            "(whole-repo or long-document digestion), multimodal inputs, "
+            "fast broad sweeps, extraction and summarization; Flash is the "
+            "cheapest, fastest coding-tier option for mechanical or "
+            "repetitive edits"
         ),
         weaknesses=(
             "less reliable on subtle multi-step logic; quality drops on "
@@ -116,7 +120,7 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
 PROVIDER_CONCURRENCY: dict[str, int] = {
     "claude": 1,
     "codex": 1,
-    "gemini": 1,
+    "agy": 1,
 }
 
 # Hard cap on how many subtasks any single node is allowed to spawn. Without

@@ -1,16 +1,17 @@
 # modelmesh
 
 Hierarchical multi-model orchestration across **Claude Code**, **Codex CLI**,
-and **Gemini CLI** — riding your existing subscriptions rather than API keys.
+and **Antigravity (`agy`)** — riding your existing subscriptions rather than
+API keys.
 
 ```
 ORCHESTRATOR   claude-fable-5 (high)
       |
-MAIN           claude-opus-4-8 (max)  |  gpt-5.5 (xhigh)  |  gemini-3.1-pro (high)
+MAIN           claude-opus-4-8 (max)  |  gpt-5.5 (xhigh)  |  agy: Gemini 3.1 Pro (High)
       |
-SECOND         claude-opus-4-8 (high) |  gpt-5.5 (high)   |  gemini-3.1-pro (high)
+SECOND         claude-opus-4-8 (high) |  gpt-5.5 (high)   |  agy: Gemini 3.1 Pro (High)
       |
-CODING         claude-sonnet-5 (max)  |  gpt-5.4 (xhigh)  |  gemini-3.5-flash (high)
+CODING         claude-sonnet-5 (max)  |  gpt-5.4 (xhigh)  |  agy: Gemini 3.5 Flash (High)
 ```
 
 A "big task" enters at ORCHESTRATOR and results synthesize back up the same
@@ -25,8 +26,9 @@ In `--mode route`, subtasks aren't handed out blindly. Every decompose prompt
 carries `MODEL_PROFILES` from `config.py` — a plain-English,
 benchmark-informed description of each provider's strengths, weaknesses, and
 cost (Claude: architecture, multi-file refactoring, agentic multi-step work;
-Codex: algorithmically tricky logic, debugging, tests; Gemini: huge-context
-digestion, broad sweeps, and the cheapest coding tier in Flash) — and the
+Codex: algorithmically tricky logic, debugging, tests; agy — Gemini via
+Antigravity: huge-context digestion, broad sweeps, and the cheapest coding
+tier in Flash) — and the
 decomposing agent assigns each subtask a `provider`, told to route toward
 strengths, away from weaknesses, and to the cheaper option when quality would
 be equal. The dispatcher honors that assignment when the provider is
@@ -72,12 +74,15 @@ review call accepts-with-a-note instead of wedging the run into retries.
 
 ## Why this is buildable at all
 
-Claude Code, Codex CLI, and Gemini CLI all officially support running
-headless off a personal subscription login instead of a metered API key:
+Claude Code, Codex CLI, and the Antigravity CLI all officially support
+running headless off a personal subscription login instead of a metered API
+key:
 
 - Claude: `claude login`, then `claude -p "..." --model ... --effort ...`
 - Codex: sign in with your ChatGPT account on first run, then `codex exec ...`
-- Gemini: sign in with your Google account, then `gemini -p "..." -m ...`
+- Antigravity: sign in with your Google account, then
+  `agy -p "..." --model "Gemini 3.1 Pro (High)"` — the reasoning level is
+  part of the model string, exactly as `agy models` lists it
 
 None of this reverse-engineers a web UI the way some "free API" tricks for
 consumer chat products do — these three are purpose-built CLIs designed for
@@ -89,7 +94,8 @@ same as "unlimited": see **Rate limits** below before you turn this loose.
 1. Install and authenticate each CLI you plan to use:
    - `claude` — https://code.claude.com (run `claude login`)
    - `codex` — `npm install -g @openai/codex`, then run `codex` once to sign in
-   - `gemini` — `npm install -g @google/gemini-cli`, then run `gemini` once to sign in
+   - `agy` — the Antigravity CLI; run `agy` once to sign in with your Google
+     account, then `agy models` to see which models your seat serves
 2. `pip install -e .` from this directory (or just run it in place — there
    are no third-party dependencies).
 3. Try it with no CLIs installed at all first:
@@ -127,7 +133,7 @@ modelmesh "Produce a security audit report of this codebase" \
   the default is sequential anyway.
 - `--providers` restricts the run to the CLIs you actually have installed
   and authenticated, without editing `TIER_CONFIG`. Start with
-  `--providers claude`, add `codex`/`gemini` as you set them up.
+  `--providers claude`, add `codex`/`agy` as you set them up.
 
 ## Rate limits are the real constraint here, not the code
 
@@ -159,8 +165,8 @@ for your primary/interactive path and fail over to `ANTHROPIC_API_KEY`
 billing for burst capacity. `PROVIDER_CONCURRENCY` in `config.py` defaults
 every provider to 1 concurrent call for exactly this reason — raise it only
 after you've watched a real run and know where your account's ceiling is.
-Codex (ChatGPT plan) and Gemini (5-hour/weekly usage windows) have the same
-shape of limit even though the exact numbers differ.
+Codex (ChatGPT plan) and Antigravity (rolling usage windows on the Google
+seat) have the same shape of limit even though the exact numbers differ.
 
 **Practical starting point:** run in `--mode route` (one provider per node)
 until the plumbing is solid, and only reach for `--mode ensemble` on the
@@ -191,12 +197,13 @@ updates weekly:
 
 - Exact JSON-output flag for `codex exec` (used `--full-auto` + best-effort
   JSON-or-text parsing so it degrades safely either way)
-- A per-call CLI flag for Gemini's thinking level (low/medium/high) — as of
-  writing this looked like a `~/.gemini/settings.json` per-profile setting
-  rather than a flag on `gemini` itself
-- The exact Gemini 3.1 Pro model string for your account (`gemini-3.1-pro`
-  vs. a `-preview` suffix) — the 3.1 rollout is still staged per-account, so
-  run `gemini` then `/model` once to see what's actually available to you
+
+The `agy` side is verified against agy 1.0.14: `--print`, `--model` with the
+display-name string from `agy models` (reasoning level included, e.g.
+"Gemini 3.1 Pro (High)"), `--print-timeout`, and
+`--dangerously-skip-permissions` for unattended runs. Output is plain text —
+there's no JSON flag — so parsing on that path is best-effort by design.
+Re-run `agy models` after updates; the model list is what moves.
 
 Claude's side needs the least hand-holding: if you ask for an effort level a
 given model doesn't support, Claude Code silently falls back to the closest
@@ -210,9 +217,9 @@ under one Python dispatcher. There's a second, lower-effort architecture: run
 Fable 5 interactively (or via `claude -p`) as the actual orchestrator, give it
 Bash access, and let its own native subagent system (the `Task` tool) handle
 the Claude-side fan-out — with Python only stepping in at the points where a
-Claude subagent needs to shell out to `codex` or `gemini`. Claude Code
+Claude subagent needs to shell out to `codex` or `agy`. Claude Code
 already provides the agent loop, retries, and context isolation for the
-Claude tiers for free; you'd only be writing the Codex/Gemini bridge, not the
+Claude tiers for free; you'd only be writing the Codex/Antigravity bridge, not the
 whole tree. Worth prototyping alongside this if you want to compare effort
 before committing to one.
 
@@ -220,7 +227,7 @@ before committing to one.
 
 - `modelmesh/tasks.py` — `Tier`, `Task`, `TaskResult`
 - `modelmesh/config.py` — the tier -> model/effort map, `MODEL_PROFILES` routing knowledge, concurrency & fan-out limits, review retry cap
-- `modelmesh/agents.py` — subprocess wrappers for `claude` / `codex` / `gemini`, plus the dry-run mock
+- `modelmesh/agents.py` — subprocess wrappers for `claude` / `codex` / `agy`, plus the dry-run mock
 - `modelmesh/prompts.py` — decompose/synthesize prompt templates + subtask parsing
 - `modelmesh/orchestrator.py` — the recursive dispatcher
 - `modelmesh/cli.py` — `python -m modelmesh "..."` entry point
