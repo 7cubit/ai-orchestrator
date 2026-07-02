@@ -13,26 +13,62 @@ SECOND         claude-opus-4-8 (high) |  gpt-5.5 (high)   |  gemini-3.1-pro (hig
 CODING         claude-sonnet-5 (max)  |  gpt-5.4 (xhigh)  |  gemini-3.5-flash (high)
 ```
 
-A "big task" enters at ORCHESTRATOR. That agent breaks it into pieces for
-MAIN; MAIN breaks its pieces down for SECOND; SECOND breaks its pieces down
-for CODING, which actually writes things (no further decomposition). Results
-synthesize back up the same path. See `modelmesh/config.py` to change any of
-the model/effort assignments — nothing else needs to know.
+A "big task" enters at ORCHESTRATOR and results synthesize back up the same
+path it was divided along. How deep the division goes is decided per subtask,
+not fixed by the diagram — see **Adaptive depth** below. See
+`modelmesh/config.py` to change any of the model/effort assignments — nothing
+else needs to know.
 
 ## Strength-aware routing
 
 In `--mode route`, subtasks aren't handed out blindly. Every decompose prompt
-carries `MODEL_STRENGTHS` from `config.py` — a plain-English description of
-what each provider is best at (Claude: architecture, multi-file refactoring,
-agentic multi-step work; Codex: algorithmically tricky logic, debugging,
-tests; Gemini: huge-context digestion, multimodal, fast broad sweeps) — and
-the decomposing agent assigns each subtask a `provider` along with its
-description. The dispatcher honors that assignment when the provider is
+carries `MODEL_PROFILES` from `config.py` — a plain-English,
+benchmark-informed description of each provider's strengths, weaknesses, and
+cost (Claude: architecture, multi-file refactoring, agentic multi-step work;
+Codex: algorithmically tricky logic, debugging, tests; Gemini: huge-context
+digestion, broad sweeps, and the cheapest coding tier in Flash) — and the
+decomposing agent assigns each subtask a `provider`, told to route toward
+strengths, away from weaknesses, and to the cheaper option when quality would
+be equal. The dispatcher honors that assignment when the provider is
 configured at the child tier, and falls back to round-robin when the model
 didn't pick one (or picked something unavailable), so routing never becomes a
 failure mode. The knowledge lives in config as editable text, not in code:
-when your opinion of a model changes, edit the sentence, not the dispatcher.
-ENSEMBLE mode ignores hints by design — it exists to call everyone.
+when the benchmarks move, edit the sentences, not the dispatcher. ENSEMBLE
+mode ignores hints by design — it exists to call everyone.
+
+## Adaptive depth (why SECOND exists but isn't always used)
+
+Depth costs money: every extra tier adds a decompose call, a synthesis call,
+and up to `MAX_FANOUT`x more leaves. So each decompose call also marks every
+subtask `needs_decomposition: true|false`:
+
+- **false** — one coding-tier agent can finish it in a focused session. The
+  subtask skips every intermediate tier and goes straight to a coding agent
+  (Sonnet 5 / GPT-5.4 / Gemini 3.5 Flash). A small bug-fix can legitimately
+  run ORCHESTRATOR -> CODING with nothing in between.
+- **true** — the work genuinely spans many files, components, or steps (a
+  bug-fix pass or audit over a 200k–500k-line codebase). It drops one tier,
+  where it gets divided again across multiple cheaper agents — this is what
+  the SECOND tier is *for*.
+
+So "fix the bugs in this project" on a big repo naturally engages all four
+tiers, while "rename this flag" costs three calls total. The default is the
+deep path when a reply omits the field, so ambiguity degrades toward quality,
+not toward cheap.
+
+## Quality review (anti-hallucination loop)
+
+After the tree synthesizes, the ORCHESTRATOR model reviews the integrated
+result against the original task with a skeptic's prompt: findings, files,
+metrics, or benchmark figures that the work couldn't actually have verified
+are grounds for rejection — an audit report that *sounds* authoritative but
+invents specifics is a `retry`, not an `accept`. On `retry`, the whole tree
+re-dispatches with the reviewer's concrete issues folded into the task
+("do not repeat these failures"), up to `--max-retries` times (default 1;
+`MAX_QUALITY_RETRIES` in config). If the reviewer still rejects after the
+last retry, the run reports failure with the issues rather than shipping
+flagged content. `--no-review` skips the loop; an unparseable or failed
+review call accepts-with-a-note instead of wedging the run into retries.
 
 ## Why this is buildable at all
 
@@ -160,7 +196,7 @@ before committing to one.
 ## Files
 
 - `modelmesh/tasks.py` — `Tier`, `Task`, `TaskResult`
-- `modelmesh/config.py` — the tier -> model/effort map, `MODEL_STRENGTHS` routing knowledge, concurrency & fan-out limits
+- `modelmesh/config.py` — the tier -> model/effort map, `MODEL_PROFILES` routing knowledge, concurrency & fan-out limits, review retry cap
 - `modelmesh/agents.py` — subprocess wrappers for `claude` / `codex` / `gemini`, plus the dry-run mock
 - `modelmesh/prompts.py` — decompose/synthesize prompt templates + subtask parsing
 - `modelmesh/orchestrator.py` — the recursive dispatcher

@@ -50,23 +50,61 @@ TIER_CONFIG: dict[Tier, list[AgentSpec]] = {
     ],
 }
 
-# What each provider is strongest at. This is routing knowledge, not code:
-# it's injected verbatim into every decompose prompt, so the decomposing
-# agent itself -- not a Python heuristic -- assigns each subtask to the
-# provider that fits it best (ROUTE mode only; ENSEMBLE always calls
-# everyone). Edit freely as your opinions about the models evolve.
-MODEL_STRENGTHS: dict[str, str] = {
-    "claude": (
-        "architecture and system design, multi-file refactoring, multi-step "
-        "agentic coding, careful instruction-following, prose and docs"
+@dataclass(frozen=True)
+class ModelProfile:
+    strengths: str
+    weaknesses: str
+    cost: str  # relative cost at the coding tier, where the volume is
+
+
+# What each provider is strong at, weak at, and costs. This is routing
+# knowledge, not code: it's injected verbatim into every decompose prompt, so
+# the decomposing agent itself -- not a Python heuristic -- assigns each
+# subtask to the provider that fits it best and decides how deep to
+# decompose (ROUTE mode only; ENSEMBLE always calls everyone).
+#
+# The claims below are qualitative summaries of where each family sat on
+# public benchmarks (SWE-bench-style agentic coding, competitive-programming
+# suites, long-context evals) when this was written. Models move monthly:
+# refresh these against current numbers, because decompose agents take them
+# at face value.
+MODEL_PROFILES: dict[str, ModelProfile] = {
+    "claude": ModelProfile(
+        strengths=(
+            "architecture and system design, multi-file refactoring, "
+            "long-horizon agentic coding (strongest on SWE-bench-style "
+            "fix-a-real-repo tasks), careful instruction-following, prose"
+        ),
+        weaknesses=(
+            "tends to over-engineer simple asks; not the cheapest choice for "
+            "bulk mechanical edits"
+        ),
+        cost="medium (Sonnet 5 at the coding tier)",
     ),
-    "codex": (
-        "algorithmically tricky logic, debugging gnarly failures, math-heavy "
-        "problems, dense single-file implementations, test generation"
+    "codex": ModelProfile(
+        strengths=(
+            "algorithmically tricky logic, debugging gnarly failures, "
+            "math-heavy problems, dense single-file implementations, test "
+            "generation (strongest on competitive-programming-style suites)"
+        ),
+        weaknesses=(
+            "weaker at broad multi-file navigation; terse plans that can "
+            "drop stated constraints"
+        ),
+        cost="medium (GPT-5.4 at the coding tier)",
     ),
-    "gemini": (
-        "very large context (whole-repo or long-document digestion), "
-        "multimodal inputs, fast broad sweeps, extraction and summarization"
+    "gemini": ModelProfile(
+        strengths=(
+            "very large context (whole-repo or long-document digestion), "
+            "multimodal inputs, fast broad sweeps, extraction and "
+            "summarization; Flash is the cheapest, fastest coding-tier "
+            "option for mechanical or repetitive edits"
+        ),
+        weaknesses=(
+            "less reliable on subtle multi-step logic; quality drops on "
+            "long agentic chains"
+        ),
+        cost="low (Gemini 3.5 Flash at the coding tier)",
     ),
 }
 
@@ -88,3 +126,9 @@ MAX_FANOUT = 3
 
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_MAX_TURNS = 15
+
+# After synthesis, the orchestrator model reviews the integrated result
+# against the original task (checking specifically for hallucinated or
+# unsupported content). A "retry" verdict re-dispatches the whole tree with
+# the reviewer's issues fed back in, at most this many times.
+MAX_QUALITY_RETRIES = 1

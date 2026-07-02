@@ -17,11 +17,21 @@ from threading import Lock, Semaphore
 from typing import Optional
 
 from .agents import build_agent
-from .config import AgentSpec, DispatchMode, PROVIDER_CONCURRENCY, TIER_CONFIG
+from .config import (
+    AgentSpec,
+    DispatchMode,
+    MAX_QUALITY_RETRIES,
+    PROVIDER_CONCURRENCY,
+    TIER_CONFIG,
+)
 from .prompts import (
+    REVIEW_SCHEMA,
     SUBTASK_SCHEMA,
     decompose_prompt,
+    parse_review,
     parse_subtasks,
+    retry_task_description,
+    review_prompt,
     synthesize_prompt,
 )
 from .tasks import Task, TaskResult, Tier, next_tier
@@ -38,6 +48,8 @@ class Orchestrator:
         max_turns: int = 15,
         parallel_children: bool = False,
         workdir: Optional[str] = None,
+        review: bool = True,
+        max_retries: int = MAX_QUALITY_RETRIES,
     ):
         self.mode = mode
         self.dry_run = dry_run
@@ -46,6 +58,8 @@ class Orchestrator:
         self.max_turns = max_turns
         self.parallel_children = parallel_children
         self.workdir = workdir
+        self.review = review
+        self.max_retries = max_retries
         self._run_dir: Optional[str] = None
         self._round_robin = {
             tier: itertools.cycle(specs) for tier, specs in TIER_CONFIG.items()
@@ -65,8 +79,47 @@ class Orchestrator:
         # agents never share (or trash) the caller's working directory.
         self._run_dir = self.workdir or tempfile.mkdtemp(prefix="modelmesh-")
         os.makedirs(self._run_dir, exist_ok=True)
-        root = Task(description=big_task, tier=Tier.ORCHESTRATOR)
-        return self._dispatch(root)
+
+        # Quality loop: dispatch, have the orchestrator model review the
+        # integrated result for hallucinated/unsupported content and gaps,
+        # and re-dispatch with the reviewer's issues folded into the task
+        # until it accepts or retries run out.
+        description = big_task
+        attempts = 1 + (self.max_retries if self.review else 0)
+        result: TaskResult
+        for attempt in range(1, attempts + 1):
+            root = Task(description=description, tier=Tier.ORCHESTRATOR)
+            result = self._dispatch(root)
+            if not self.review or not result.success:
+                return result
+            review = self._review(big_task, result)
+            result.review = {**review, "attempts": attempt}
+            if review["verdict"] == "accept":
+                return result
+            description = retry_task_description(big_task, review["issues"])
+        # Retries exhausted with the reviewer still unconvinced: surface
+        # that rather than shipping content flagged as weak or fabricated.
+        result.success = False
+        result.error = (
+            f"review rejected the result after {attempts} attempt(s): "
+            + ("; ".join(result.review["issues"]) or "quality below the bar")
+        )
+        return result
+
+    def _review(self, big_task: str, result: TaskResult) -> dict:
+        spec = TIER_CONFIG[Tier.ORCHESTRATOR][0]
+        call = self._call(
+            spec, result.task, review_prompt(big_task, result.output),
+            schema=REVIEW_SCHEMA,
+        )
+        # A reviewer that failed or answered unparseably must not wedge the
+        # run into endless retries -- accept and note it.
+        if not call.success:
+            return {"verdict": "accept", "issues": [], "note": "review call failed; accepted unreviewed"}
+        parsed = parse_review(call.output)
+        if parsed is None:
+            return {"verdict": "accept", "issues": [], "note": "review verdict unparseable; accepted unreviewed"}
+        return parsed
 
     # -- internals ------------------------------------------------------
 
@@ -139,10 +192,13 @@ class Orchestrator:
             if not call.success:
                 continue  # a failed decompose has no output worth parsing
             subtasks = parse_subtasks(call.output)[: self.max_fanout]
+            # Adaptive depth: a subtask one coding agent can finish skips
+            # straight to the (cheap) coding tier; only work that genuinely
+            # needs another round of division goes to the next tier down.
             child_tasks = [
                 Task(
                     description=st.description,
-                    tier=lower,
+                    tier=lower if st.needs_decomposition else Tier.CODING,
                     parent_id=task.task_id,
                     depth=task.depth + 1,
                     preferred_provider=st.provider,

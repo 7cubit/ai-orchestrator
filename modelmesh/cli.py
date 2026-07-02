@@ -7,7 +7,7 @@ import json
 import sys
 from typing import Optional
 
-from .config import DispatchMode
+from .config import DispatchMode, MAX_QUALITY_RETRIES
 from .orchestrator import Orchestrator
 from .tasks import TaskResult
 
@@ -32,6 +32,7 @@ def _to_dict(r: TaskResult) -> dict:
         "success": r.success,
         "output": r.output,
         "error": r.error,
+        "review": r.review,
         "children": [_to_dict(c) for c in r.children],
     }
 
@@ -51,6 +52,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--workdir", default=None,
                          help="Base directory for per-call agent workdirs "
                               "(default: a fresh temp directory per run)")
+    parser.add_argument("--no-review", action="store_true",
+                         help="Skip the orchestrator's post-synthesis quality/"
+                              "hallucination review (and its retries)")
+    parser.add_argument("--max-retries", type=int, default=MAX_QUALITY_RETRIES,
+                         help="Full re-dispatches allowed when review rejects "
+                              "the result")
     parser.add_argument("--json", action="store_true",
                          help="Print the final result tree as JSON instead of text")
     args = parser.parse_args(argv)
@@ -63,6 +70,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         max_turns=args.max_turns,
         parallel_children=args.parallel_children,
         workdir=args.workdir,
+        review=not args.no_review,
+        max_retries=args.max_retries,
     )
     result = orchestrator.run(args.task)
 
@@ -70,6 +79,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(_to_dict(result), indent=2))
     else:
         _print_tree(result)
+        if result.review:
+            note = result.review.get("note")
+            print(
+                f"\nreview: {result.review['verdict']} "
+                f"(attempt {result.review.get('attempts', 1)})"
+                + (f" - {note}" if note else "")
+            )
+            for issue in result.review.get("issues", []):
+                print(f"  - {issue}")
         print("\n--- final output ---\n")
         print(result.output)
 
