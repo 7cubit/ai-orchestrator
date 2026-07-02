@@ -89,7 +89,21 @@ consumer chat products do — these three are purpose-built CLIs designed for
 exactly this kind of scripted/agentic use. That said, "supported" isn't the
 same as "unlimited": see **Rate limits** below before you turn this loose.
 
-## Setup
+## Setup (any machine)
+
+Everything needed lives in this repo; per-machine state is just the CLI
+logins.
+
+```bash
+git clone https://github.com/7cubit/ai-orchestrator.git
+cd ai-orchestrator
+uv tool install --editable .        # -> `modelmesh` on PATH
+# no uv? curl -LsSf https://astral.sh/uv/install.sh | sh   (or use pipx)
+
+# let Claude Code drive it via /modelmesh:
+mkdir -p ~/.claude/skills/modelmesh
+cp claude-skill/SKILL.md ~/.claude/skills/modelmesh/SKILL.md
+```
 
 1. Install and authenticate each CLI you plan to use:
    - `claude` — https://code.claude.com (run `claude login`)
