@@ -151,6 +151,69 @@ modelmesh "Produce a security audit report of this codebase" --max-retries 2
 - `--providers` restricts the run to the CLIs you actually have installed
   and authenticated, without editing `TIER_CONFIG`.
 
+## Prompt ideas
+
+The prompt is the whole interface, so shape it like a work order: say what
+"done" means, name the evidence you want (files, lines, passing tests), and
+put constraints in the prompt itself — subtasks inherit them. All of these
+work identically as `/modelmesh <prompt>` inside a Claude Code session.
+
+Bug-fix sweep (run from inside the repo, on a branch):
+
+```bash
+modelmesh "Find and fix every failing test in this repo. Do not modify the
+tests themselves. For each fix, state the root cause in one sentence. Run
+the full test suite at the end and report the pass count."
+```
+
+Security audit (the review gate rejects invented findings):
+
+```bash
+modelmesh "Produce a security audit of this codebase. Cite file and line for
+every finding, rate each Critical/High/Medium/Low, and propose a concrete
+fix per finding. Do not report anything you cannot point to in the code." \
+    --max-retries 2 --json > audit.json
+```
+
+Big-codebase comprehension (plays to the cheap huge-context tier):
+
+```bash
+modelmesh "Map this repo's architecture: entry points, data flow, external
+services, and the five files a new engineer must read first. Cite paths."
+```
+
+Cross-model design review (ensemble = every provider answers, then the tree
+reconciles disagreements — worth 3x the spend only on decisions):
+
+```bash
+modelmesh "Design a multi-tenant rate limiter for an SMTP API: token bucket
+vs sliding window, storage choice, and failure behavior under Redis loss.
+State trade-offs explicitly." --mode ensemble --isolated
+```
+
+Mechanical migration (large but shallow — say so, and the decomposers will
+fan it out to cheap coding agents instead of over-planning):
+
+```bash
+modelmesh "Rename the config key 'smtp_host' to 'relay_host' across this
+entire repo -- code, tests, docs, and example configs. This is mechanical:
+no redesign, keep every change minimal."
+```
+
+Report/document generation (no repo needed):
+
+```bash
+modelmesh "Write a runbook for recovering a Postgres primary from pgBackRest
+when the WAL archive is 6 hours behind: preconditions, exact commands,
+verification steps, and rollback." --isolated
+```
+
+Anti-patterns: don't send one-liners ("what does this function do?") — a
+single `claude -p` call answers those for a fraction of the cost; don't
+bundle unrelated asks in one run (each gets shallower attention than it
+would alone); and don't leave success undefined ("make it better") — the
+review gate can only reject what the prompt lets it measure.
+
 ## Rate limits are the real constraint here, not the code
 
 The code above is the easy part — maybe a day to get right, plus ongoing
