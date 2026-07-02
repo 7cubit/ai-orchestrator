@@ -40,7 +40,10 @@ def _to_dict(r: TaskResult) -> dict:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="modelmesh", description=__doc__)
-    parser.add_argument("task", help="Description of the big task to run through the hierarchy")
+    parser.add_argument("task", nargs="?", default=None,
+                         help="Description of the big task to run through the "
+                              "hierarchy; omit it to start an interactive "
+                              "session and type tasks at a prompt")
     parser.add_argument("--dry-run", action="store_true",
                          help="Skip real CLI calls; use canned stub responses")
     parser.add_argument("--mode", choices=["route", "ensemble"], default="route")
@@ -54,9 +57,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                          help="Base directory for per-call agent workdirs "
                               "(default: a fresh temp directory per run)")
     parser.add_argument("--project", default=None,
-                         help="Path to a real repo to work in: every agent "
-                              "call runs there instead of an isolated scratch "
-                              "dir (avoid --parallel-children with this)")
+                         help="Repo to work in (default: the current "
+                              "directory, like claude/codex/agy). Pass a "
+                              "path to target another repo without cd-ing")
+    parser.add_argument("--isolated", action="store_true",
+                         help="Don't touch the current directory: run every "
+                              "agent in its own scratch dir instead (for "
+                              "purely generative tasks)")
     parser.add_argument("--providers", default=None,
                          help="Comma-separated subset of providers to use, "
                               "e.g. 'claude' if codex/agy aren't "
@@ -71,15 +78,20 @@ def main(argv: Optional[list[str]] = None) -> int:
                          help="Print the final result tree as JSON instead of text")
     args = parser.parse_args(argv)
 
+    if args.isolated and args.project:
+        parser.error("--isolated and --project are mutually exclusive")
     project = None
-    if args.project:
-        project = os.path.abspath(os.path.expanduser(args.project))
+    if not args.isolated:
+        # Like claude/codex/agy: the project is wherever you're standing,
+        # unless --project points somewhere else.
+        project = os.path.abspath(os.path.expanduser(args.project or os.getcwd()))
         if not os.path.isdir(project):
             parser.error(f"--project: no such directory: {project}")
         if args.parallel_children:
             print(
-                "warning: --project with --parallel-children means concurrent "
-                "agents share one working tree; their edits can collide",
+                "warning: agents share one working tree under "
+                "--parallel-children; their edits can collide (use "
+                "--isolated for generative tasks)",
                 file=sys.stderr,
             )
 
@@ -96,25 +108,63 @@ def main(argv: Optional[list[str]] = None) -> int:
         project=project,
         providers=[p.strip() for p in args.providers.split(",")] if args.providers else None,
     )
+
+    if args.task is None:
+        return _repl(orchestrator, args)
+
     result = orchestrator.run(args.task)
-
-    if args.json:
-        print(json.dumps(_to_dict(result), indent=2))
-    else:
-        _print_tree(result)
-        if result.review:
-            note = result.review.get("note")
-            print(
-                f"\nreview: {result.review['verdict']} "
-                f"(attempt {result.review.get('attempts', 1)})"
-                + (f" - {note}" if note else "")
-            )
-            for issue in result.review.get("issues", []):
-                print(f"  - {issue}")
-        print("\n--- final output ---\n")
-        print(result.output)
-
+    _emit(result, as_json=args.json)
     return 0 if result.success else 1
+
+
+def _emit(result: TaskResult, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(_to_dict(result), indent=2))
+        return
+    _print_tree(result)
+    if result.review:
+        note = result.review.get("note")
+        print(
+            f"\nreview: {result.review['verdict']} "
+            f"(attempt {result.review.get('attempts', 1)})"
+            + (f" - {note}" if note else "")
+        )
+        for issue in result.review.get("issues", []):
+            print(f"  - {issue}")
+    print("\n--- final output ---\n")
+    print(result.output)
+
+
+def _repl(orchestrator: Orchestrator, args: argparse.Namespace) -> int:
+    """Interactive session: type a task, get a run, repeat. All flags given
+    at launch (mode, project, providers, review, ...) apply to every task."""
+    try:
+        import readline  # noqa: F401  -- line editing + up-arrow history
+    except ImportError:
+        pass
+    providers = ",".join(sorted(
+        {s.provider for specs in orchestrator.tier_config.values() for s in specs}
+    ))
+    print(f"modelmesh {'DRY-RUN ' if orchestrator.dry_run else ''}interactive "
+          f"-- mode={args.mode}, providers={providers}"
+          + (f", project={orchestrator.project}" if orchestrator.project else ""))
+    print("Type a task and press enter. /exit (or Ctrl-D) to quit.")
+    while True:
+        try:
+            line = input("\nmodelmesh> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not line:
+            continue
+        if line in ("/exit", "/quit", "exit", "quit"):
+            return 0
+        try:
+            result = orchestrator.run(line)
+        except KeyboardInterrupt:
+            print("\n[run interrupted -- back at the prompt]")
+            continue
+        _emit(result, as_json=args.json)
 
 
 if __name__ == "__main__":
