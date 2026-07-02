@@ -99,6 +99,23 @@ tree. The ORCHESTRATOR tier has only one provider (Fable 5), so it has no
 failover — keep its per-call `--timeout` generous. ENSEMBLE mode doesn't fail
 over because it already calls every provider.
 
+## Watching a run, and why planners get a shorter leash
+
+`--verbose` (`-v`) prints one line per agent call to stderr as the run works
+— `[coding] codex:gpt-5.4 work started` / `... done in 94s` — so a
+20-minute run is distinguishable from a hung one and you can see exactly
+which call is sitting on the clock. stdout is untouched, so `--json` output
+stays parseable.
+
+Separately, decompose/synthesize/review calls are single-shot text→JSON
+work, so they run under a tighter budget than real coding work:
+`REASONING_TIMEOUT_SECONDS` (240s) and `REASONING_MAX_TURNS` (3) in
+`config.py`, further clamped by `--timeout`/`--max-turns` when those are set
+lower. A stalled planner now fails over in ~4 minutes instead of sitting out
+the full `--timeout`, and a decompose agent can't spend 15 tool-use turns
+wandering the repo before answering. Leaf (coding-tier) calls keep the full
+budget.
+
 ## Quality review (anti-hallucination loop)
 
 After the tree synthesizes, the ORCHESTRATOR model reviews the integrated

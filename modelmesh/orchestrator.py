@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import itertools
 import os
+import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock, Semaphore
 from typing import Optional
@@ -23,6 +25,8 @@ from .config import (
     MAX_FANOUT,
     MAX_QUALITY_RETRIES,
     PROVIDER_CONCURRENCY,
+    REASONING_MAX_TURNS,
+    REASONING_TIMEOUT_SECONDS,
     SPEED_RANK,
     TIER_CONFIG,
 )
@@ -56,6 +60,7 @@ class Orchestrator:
         project: Optional[str] = None,
         providers: Optional[list[str]] = None,
         prefer: Optional[str] = None,
+        verbose: bool = False,
     ):
         self.mode = mode
         self.dry_run = dry_run
@@ -67,6 +72,9 @@ class Orchestrator:
         self.max_turns = max_turns
         self.parallel_children = parallel_children
         self.workdir = workdir
+        # Live progress: one line per call start/finish on stderr, so a
+        # 20-minute run is distinguishable from a hung one.
+        self.verbose = verbose
         self.review = review
         self.max_retries = max_retries
         # A real repo to work in: every agent call runs with this as its cwd
@@ -149,7 +157,7 @@ class Orchestrator:
         spec = self.tier_config[Tier.ORCHESTRATOR][0]
         call = self._call(
             spec, result.task, review_prompt(big_task, result.output),
-            schema=REVIEW_SCHEMA,
+            schema=REVIEW_SCHEMA, kind="review",
         )
         # A reviewer that failed or answered unparseably must not wedge the
         # run into endless retries -- accept and note it.
@@ -161,6 +169,11 @@ class Orchestrator:
         return parsed
 
     # -- internals ------------------------------------------------------
+
+    def _progress(self, message: str) -> None:
+        # stderr, so --json output on stdout stays parseable.
+        if self.verbose:
+            print(f"modelmesh: {message}", file=sys.stderr, flush=True)
 
     def _pick_specs(self, tier: Tier, preferred: Optional[str] = None) -> list[AgentSpec]:
         if self.mode is DispatchMode.ENSEMBLE:
@@ -193,7 +206,7 @@ class Orchestrator:
 
     def _call_with_failover(
         self, task: Task, prompt: str, preferred: Optional[str] = None,
-        schema: Optional[dict] = None,
+        schema: Optional[dict] = None, kind: str = "work",
     ) -> TaskResult:
         """ROUTE-mode call with provider failover: try the primary, and on any
         failure (timeout, missing CLI, error exit) hand the SAME subtask to the
@@ -204,7 +217,7 @@ class Orchestrator:
         last: Optional[TaskResult] = None
         tried: list[str] = []
         for spec in candidates:
-            result = self._call(spec, task, prompt, schema)
+            result = self._call(spec, task, prompt, schema, kind=kind)
             if result.success:
                 if last is not None:  # we recovered after >=1 failover
                     result.failover_from = tried
@@ -215,10 +228,11 @@ class Orchestrator:
         # with the full failover chain so the failure is legible.
         if last is not None and len(tried) > 1:
             last.error = "all providers failed -> " + "; ".join(tried)
-        return last if last is not None else self._call(candidates[0], task, prompt, schema)
+        return last if last is not None else self._call(candidates[0], task, prompt, schema, kind=kind)
 
     def _call(
-        self, spec: AgentSpec, task: Task, prompt: str, schema: Optional[dict] = None
+        self, spec: AgentSpec, task: Task, prompt: str,
+        schema: Optional[dict] = None, *, kind: str = "work",
     ) -> TaskResult:
         if self.project:
             call_dir = self.project
@@ -227,15 +241,30 @@ class Orchestrator:
                 self._run_dir, f"{task.tier.value}-{task.task_id}-{spec.provider}"
             )
             os.makedirs(call_dir, exist_ok=True)
+        # Decompose/synthesize/review are single-shot text->JSON calls; they
+        # get a tighter timeout and turn budget than real (leaf) work, so a
+        # stalled planner fails over in minutes rather than sitting out the
+        # full --timeout, and can't spend 15 tool turns wandering the repo.
+        reasoning = kind != "work"
         agent = build_agent(
             spec,
             dry_run=self.dry_run,
-            timeout=self.timeout,
-            max_turns=self.max_turns,
+            timeout=min(self.timeout, REASONING_TIMEOUT_SECONDS) if reasoning else self.timeout,
+            max_turns=min(self.max_turns, REASONING_MAX_TURNS) if reasoning else self.max_turns,
             workdir=call_dir,
         )
+        label = f"[{task.tier.value}] {spec.provider}:{spec.model} {kind}"
         with self._sems[spec.provider]:
+            # Inside the semaphore, so a call queued behind the provider's
+            # concurrency slot doesn't read as already running.
+            self._progress(f"{label} started")
+            started = time.monotonic()
             outcome = agent.run(prompt, schema=schema)
+            elapsed = time.monotonic() - started
+        self._progress(
+            f"{label} {'done' if outcome.success else f'FAILED ({outcome.error})'} "
+            f"in {elapsed:.0f}s"
+        )
         return TaskResult(
             task=task,
             provider=spec.provider,
@@ -272,7 +301,8 @@ class Orchestrator:
         )
         if ensemble:
             decompose_calls = [
-                self._call(spec, task, decompose_prompt_text, schema=SUBTASK_SCHEMA)
+                self._call(spec, task, decompose_prompt_text,
+                           schema=SUBTASK_SCHEMA, kind="decompose")
                 for spec in self.tier_config[task.tier]
             ]
         else:
@@ -281,7 +311,7 @@ class Orchestrator:
             decompose_calls = [
                 self._call_with_failover(
                     task, decompose_prompt_text, task.preferred_provider,
-                    schema=SUBTASK_SCHEMA,
+                    schema=SUBTASK_SCHEMA, kind="decompose",
                 )
             ]
 
@@ -333,11 +363,13 @@ class Orchestrator:
         synth_prompt = synthesize_prompt(task, all_children)
         if ensemble:
             synth_result = self._call(
-                self.tier_config[task.tier][0], task, synth_prompt
+                self.tier_config[task.tier][0], task, synth_prompt,
+                kind="synthesize",
             )
         else:
             synth_result = self._call_with_failover(
-                task, synth_prompt, decompose_calls[0].provider
+                task, synth_prompt, decompose_calls[0].provider,
+                kind="synthesize",
             )
         synth_result.children = all_children
 

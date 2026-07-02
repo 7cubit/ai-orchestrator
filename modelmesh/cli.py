@@ -9,7 +9,13 @@ import sys
 import tempfile
 from typing import Optional
 
-from .config import DispatchMode, MAX_FANOUT, MAX_QUALITY_RETRIES
+from .config import (
+    DEFAULT_MAX_TURNS,
+    DEFAULT_TIMEOUT_SECONDS,
+    DispatchMode,
+    MAX_FANOUT,
+    MAX_QUALITY_RETRIES,
+)
 from .orchestrator import Orchestrator
 from .tasks import TaskResult
 
@@ -75,9 +81,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                               f"MAX_FANOUT={MAX_FANOUT} in config)")
     parser.add_argument("--parallel-children", action="store_true",
                          help="Fan out child tasks concurrently (mind provider rate limits)")
-    parser.add_argument("--timeout", type=int, default=600)
-    parser.add_argument("--max-turns", type=int, default=15,
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS,
                          help="Max agent turns per Claude Code call")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                         help="Print one line per agent call (start/finish, "
+                              "elapsed time) to stderr while the run works, "
+                              "so long runs are distinguishable from hangs")
     parser.add_argument("--workdir", default=None,
                          help="Base directory for per-call agent workdirs "
                               "(default: a fresh temp directory per run)")
@@ -151,6 +161,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         project=project,
         providers=[p.strip() for p in args.providers.split(",")] if args.providers else None,
         prefer=args.prefer,
+        verbose=args.verbose,
     )
 
     if args.task is None:

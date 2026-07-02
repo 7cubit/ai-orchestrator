@@ -138,6 +138,15 @@ MAX_FANOUT = 3
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_MAX_TURNS = 15
 
+# Decompose, synthesize, and review calls are single-shot text->JSON work;
+# they don't need the coding tier's turn budget or timeout. Giving them the
+# full --timeout/--max-turns means a stalled planner burns 10 minutes before
+# failover, and a decompose agent with 15 turns of tool access can wander the
+# repo before answering. These caps apply to every non-leaf call (further
+# clamped by --timeout/--max-turns when those are set lower).
+REASONING_TIMEOUT_SECONDS = 240
+REASONING_MAX_TURNS = 3
+
 # After synthesis, the orchestrator model reviews the integrated result
 # against the original task (checking specifically for hallucinated or
 # unsupported content). A "retry" verdict re-dispatches the whole tree with
