@@ -23,6 +23,7 @@ from .config import (
     MAX_FANOUT,
     MAX_QUALITY_RETRIES,
     PROVIDER_CONCURRENCY,
+    SPEED_RANK,
     TIER_CONFIG,
 )
 from .prompts import (
@@ -159,6 +160,44 @@ class Orchestrator:
         with self._rr_lock:
             return [next(self._round_robin[tier])]
 
+    def _candidate_specs(self, tier: Tier, preferred: Optional[str]) -> list[AgentSpec]:
+        """The primary spec for this node, followed by failover candidates
+        (the other providers at this tier) ordered fastest-first -- so if the
+        primary times out, the next attempt uses a quicker model."""
+        primary = self._pick_specs(tier, preferred)[0]
+        fallbacks = sorted(
+            (s for s in self.tier_config[tier] if s.provider != primary.provider),
+            key=lambda s: SPEED_RANK.get(s.speed, 2),
+            reverse=True,
+        )
+        return [primary, *fallbacks]
+
+    def _call_with_failover(
+        self, task: Task, prompt: str, preferred: Optional[str] = None,
+        schema: Optional[dict] = None,
+    ) -> TaskResult:
+        """ROUTE-mode call with provider failover: try the primary, and on any
+        failure (timeout, missing CLI, error exit) hand the SAME subtask to the
+        next provider at this tier instead of failing the branch. Bounded by
+        the number of providers, so a genuinely bad task can't fan out
+        forever."""
+        candidates = self._candidate_specs(task.tier, preferred)
+        last: Optional[TaskResult] = None
+        tried: list[str] = []
+        for spec in candidates:
+            result = self._call(spec, task, prompt, schema)
+            if result.success:
+                if last is not None:  # we recovered after >=1 failover
+                    result.failover_from = tried
+                return result
+            tried.append(f"{spec.provider}({result.error})")
+            last = result
+        # Everyone at this tier failed; return the last attempt, annotated
+        # with the full failover chain so the failure is legible.
+        if last is not None and len(tried) > 1:
+            last.error = "all providers failed -> " + "; ".join(tried)
+        return last if last is not None else self._call(candidates[0], task, prompt, schema)
+
     def _call(
         self, spec: AgentSpec, task: Task, prompt: str, schema: Optional[dict] = None
     ) -> TaskResult:
@@ -190,28 +229,42 @@ class Orchestrator:
         )
 
     def _dispatch(self, task: Task) -> TaskResult:
-        specs = self._pick_specs(task.tier, task.preferred_provider)
+        ensemble = self.mode is DispatchMode.ENSEMBLE
         lower = next_tier(task.tier)
 
         if lower is None:
             # CODING tier: leaf. No decomposition, just do the work.
-            results = [self._call(spec, task, task.description) for spec in specs]
-            return self._merge_leaf_results(task, results)
+            if ensemble:
+                results = [
+                    self._call(spec, task, task.description)
+                    for spec in self.tier_config[task.tier]
+                ]
+                return self._merge_leaf_results(task, results)
+            # ROUTE: one provider, with failover to another on timeout/error.
+            return self._call_with_failover(task, task.description, task.preferred_provider)
 
         # Non-leaf tier: ask the agent(s) to decompose, run children, synthesize.
-        # The decompose prompt carries MODEL_STRENGTHS for the providers
+        # The decompose prompt carries MODEL_PROFILES for the providers
         # configured at the child tier, so the decomposing agent routes each
         # subtask to whichever model is strongest for it.
         lower_providers = list(dict.fromkeys(s.provider for s in self.tier_config[lower]))
-        decompose_calls = [
-            self._call(
-                spec,
-                task,
-                decompose_prompt(task, lower, self.max_fanout, providers=lower_providers),
-                schema=SUBTASK_SCHEMA,
-            )
-            for spec in specs
-        ]
+        decompose_prompt_text = decompose_prompt(
+            task, lower, self.max_fanout, providers=lower_providers
+        )
+        if ensemble:
+            decompose_calls = [
+                self._call(spec, task, decompose_prompt_text, schema=SUBTASK_SCHEMA)
+                for spec in self.tier_config[task.tier]
+            ]
+        else:
+            # ROUTE: decompose with failover, so a timed-out planner at this
+            # tier hands off to another provider instead of killing the branch.
+            decompose_calls = [
+                self._call_with_failover(
+                    task, decompose_prompt_text, task.preferred_provider,
+                    schema=SUBTASK_SCHEMA,
+                )
+            ]
 
         all_children: list[TaskResult] = []
         for call in decompose_calls:
@@ -253,13 +306,20 @@ class Orchestrator:
             failed.children = decompose_calls[1:]
             return failed
 
-        # ROUTE: the same spec that decomposed also integrates.
-        # ENSEMBLE: arbitrarily use the first configured provider as
-        # integrator -- swap for real reconciliation logic if you want one
-        # tier's agent to judge/pick between the others rather than just
-        # merge their output.
-        synth_spec = specs[0]
-        synth_result = self._call(synth_spec, task, synthesize_prompt(task, all_children))
+        # Integrate the children back into one result.
+        # ROUTE: prefer the provider that decomposed (with failover if it now
+        # times out). ENSEMBLE: the first configured provider integrates --
+        # swap for real reconciliation logic if you want one tier's agent to
+        # judge/pick between the others rather than just merge their output.
+        synth_prompt = synthesize_prompt(task, all_children)
+        if ensemble:
+            synth_result = self._call(
+                self.tier_config[task.tier][0], task, synth_prompt
+            )
+        else:
+            synth_result = self._call_with_failover(
+                task, synth_prompt, decompose_calls[0].provider
+            )
         synth_result.children = all_children
 
         # Propagate failure upward: a synthesis over failed subtrees is not a

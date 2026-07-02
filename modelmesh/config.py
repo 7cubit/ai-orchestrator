@@ -15,9 +15,16 @@ from .tasks import Tier
 
 @dataclass(frozen=True)
 class AgentSpec:
-    provider: str  # "claude" | "codex" | "agy"
+    provider: str   # "claude" | "codex" | "agy"
     model: str      # the CLI-facing model id/alias
-    effort: str      # provider-specific reasoning/effort/thinking level
+    effort: str     # provider-specific reasoning/effort/thinking level
+    speed: str = "medium"  # "fast" | "medium" | "slow" -- relative wall-clock;
+    # used to order failover: after a timeout the next provider tried is the
+    # fastest remaining one, so the retry is likelier to finish in time.
+
+
+# Higher = faster. Failover orders fallback providers by this, descending.
+SPEED_RANK: dict[str, int] = {"fast": 3, "medium": 2, "slow": 1}
 
 
 class DispatchMode(Enum):
@@ -34,19 +41,19 @@ TIER_CONFIG: dict[Tier, list[AgentSpec]] = {
         AgentSpec("claude", "claude-fable-5", "high"),
     ],
     Tier.MAIN: [
-        AgentSpec("claude", "claude-opus-4-8", "max"),
-        AgentSpec("codex", "gpt-5.5", "xhigh"),
-        AgentSpec("agy", "Gemini 3.1 Pro (High)", "high"),
+        AgentSpec("claude", "claude-opus-4-8", "max", speed="slow"),
+        AgentSpec("codex", "gpt-5.5", "xhigh", speed="medium"),
+        AgentSpec("agy", "Gemini 3.1 Pro (High)", "high", speed="medium"),
     ],
     Tier.SECOND: [
-        AgentSpec("claude", "claude-opus-4-8", "high"),
-        AgentSpec("codex", "gpt-5.5", "high"),
-        AgentSpec("agy", "Gemini 3.1 Pro (High)", "high"),
+        AgentSpec("claude", "claude-opus-4-8", "high", speed="slow"),
+        AgentSpec("codex", "gpt-5.5", "high", speed="medium"),
+        AgentSpec("agy", "Gemini 3.1 Pro (High)", "high", speed="medium"),
     ],
     Tier.CODING: [
-        AgentSpec("claude", "claude-sonnet-5", "max"),
-        AgentSpec("codex", "gpt-5.4", "xhigh"),
-        AgentSpec("agy", "Gemini 3.5 Flash (High)", "high"),
+        AgentSpec("claude", "claude-sonnet-5", "max", speed="medium"),
+        AgentSpec("codex", "gpt-5.4", "xhigh", speed="medium"),
+        AgentSpec("agy", "Gemini 3.5 Flash (High)", "high", speed="fast"),
     ],
 }
 # Note on agy (Antigravity CLI): the reasoning level is baked into the model

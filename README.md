@@ -58,6 +58,24 @@ tiers, while "rename this flag" costs three calls total. The default is the
 deep path when a reply omits the field, so ambiguity degrades toward quality,
 not toward cheap.
 
+## Failover (a timed-out agent hands off, it doesn't sink the branch)
+
+In `route` mode, every node call has a provider failover chain. If the chosen
+provider times out, its CLI is missing, or it exits with an error, the *same*
+subtask is retried on another provider at that tier instead of failing the
+branch. The fallbacks are ordered **fastest-first** — each model carries a
+`speed` rating in `config.py` (`fast`/`medium`/`slow`), and since a timeout
+usually means "too slow to finish in the window," the next attempt uses a
+quicker model (e.g. a stalled Opus coding call fails over to Gemini Flash).
+
+It's bounded by the number of providers at the tier, so a genuinely broken
+task can't fan out forever — once everyone has failed, the branch fails with
+the full chain recorded (`all providers failed -> claude(timed out...);
+codex(...)`), and a recovered call is tagged `failed over from ...` in the
+tree. The ORCHESTRATOR tier has only one provider (Fable 5), so it has no
+failover — keep its per-call `--timeout` generous. ENSEMBLE mode doesn't fail
+over because it already calls every provider.
+
 ## Quality review (anti-hallucination loop)
 
 After the tree synthesizes, the ORCHESTRATOR model reviews the integrated

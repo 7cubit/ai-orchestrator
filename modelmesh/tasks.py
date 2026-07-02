@@ -56,3 +56,6 @@ class TaskResult:
     # Root result only: the orchestrator's post-synthesis quality review
     # ({"verdict": "accept"|"retry", "issues": [...], "attempts": N}).
     review: Optional[dict] = None
+    # Set when this call succeeded only after failing over from other
+    # providers: the list of "provider(error)" attempts that preceded it.
+    failover_from: Optional[list[str]] = None

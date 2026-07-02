@@ -16,9 +16,13 @@ from .tasks import TaskResult
 def _print_tree(result: TaskResult, indent: int = 0) -> None:
     pad = "  " * indent
     status = "ok" if result.success else f"FAILED: {result.error}"
+    failover = (
+        f" (failed over from {', '.join(result.failover_from)})"
+        if result.failover_from else ""
+    )
     print(
         f"{pad}[{result.task.tier.value}] "
-        f"{result.provider}:{result.model}@{result.effort} - {status}"
+        f"{result.provider}:{result.model}@{result.effort} - {status}{failover}"
     )
     for child in result.children:
         _print_tree(child, indent + 1)
@@ -34,6 +38,7 @@ def _to_dict(r: TaskResult) -> dict:
         "output": r.output,
         "error": r.error,
         "review": r.review,
+        "failover_from": r.failover_from,
         "children": [_to_dict(c) for c in r.children],
     }
 
