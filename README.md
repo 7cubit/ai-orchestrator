@@ -99,6 +99,26 @@ tree. The ORCHESTRATOR tier has only one provider (Fable 5), so it has no
 failover — keep its per-call `--timeout` generous. ENSEMBLE mode doesn't fail
 over because it already calls every provider.
 
+## Cross-provider parallelism (free wall-clock, no extra rate-limit risk)
+
+Siblings routed to *different* providers have zero rate-limit contention —
+your Claude, ChatGPT, and Google seats are independent accounts. So:
+
+- **Isolated runs parallelize automatically.** Every call has its own
+  scratch dir (nothing to collide in), and the per-provider semaphores do
+  the scheduling: same-seat siblings still run one-at-a-time
+  (`PROVIDER_CONCURRENCY`), different-seat siblings overlap. At most one
+  call per seat is in flight — the same account pressure as a sequential
+  run, finished sooner.
+- **ENSEMBLE fan-out is concurrent.** A node that calls all three providers
+  now takes as long as the slowest one instead of the sum of all three.
+  Ensemble *decompose* calls are concurrent even in `--project` mode — they
+  run read-only since the least-privilege change, so they can't collide in
+  the tree.
+- **`--project` runs stay sequential by default.** Coding agents there
+  share one real working tree; concurrent edits can collide, so concurrency
+  remains opt-in via `--parallel-children`.
+
 ## Watching a run, and why planners get a shorter leash
 
 `--verbose` (`-v`) prints one line per agent call to stderr as the run works

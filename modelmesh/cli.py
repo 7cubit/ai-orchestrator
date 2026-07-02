@@ -81,7 +81,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                          help=f"Max subtasks per node (hard-capped at "
                               f"MAX_FANOUT={MAX_FANOUT} in config)")
     parser.add_argument("--parallel-children", action="store_true",
-                         help="Fan out child tasks concurrently (mind provider rate limits)")
+                         help="Also fan out child tasks concurrently in "
+                              "--project mode, where agents share one "
+                              "working tree and edits can collide. Isolated "
+                              "runs already parallelize automatically "
+                              "(per-provider semaphores keep each seat at "
+                              "its concurrency cap)")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--run-timeout", type=int, default=RUN_TIMEOUT_SECONDS,
                          help="Aggregate wall-clock budget for the whole run "

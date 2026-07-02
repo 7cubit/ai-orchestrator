@@ -318,10 +318,16 @@ class Orchestrator:
         if lower is None:
             # CODING tier: leaf. No decomposition, just do the work.
             if ensemble:
-                results = [
-                    self._call(spec, task, leaf_prompt(task))
+                # Distinct providers -> concurrent, unless they'd share a
+                # real working tree without the operator opting in.
+                thunks = [
+                    (lambda s=spec: self._call(s, task, leaf_prompt(task)))
                     for spec in self.tier_config[task.tier]
                 ]
+                if self.project is None or self.parallel_children:
+                    results = self._fanout(thunks)
+                else:
+                    results = [t() for t in thunks]
                 return self._merge_leaf_results(task, results)
             # ROUTE: one provider, with failover to another on timeout/error.
             return self._call_with_failover(task, leaf_prompt(task), task.preferred_provider)
@@ -335,11 +341,14 @@ class Orchestrator:
             task, lower, self.max_fanout, providers=lower_providers
         )
         if ensemble:
-            decompose_calls = [
-                self._call(spec, task, decompose_prompt_text,
-                           schema=SUBTASK_SCHEMA, kind="decompose")
+            # Decompose calls are restricted (read-only) since the
+            # least-privilege change, so concurrent planners are safe even
+            # in --project mode -- they can't write the shared tree.
+            decompose_calls = self._fanout([
+                (lambda s=spec: self._call(s, task, decompose_prompt_text,
+                                           schema=SUBTASK_SCHEMA, kind="decompose"))
                 for spec in self.tier_config[task.tier]
-            ]
+            ])
         else:
             # ROUTE: decompose with failover, so a timed-out planner at this
             # tier hands off to another provider instead of killing the branch.
@@ -423,10 +432,28 @@ class Orchestrator:
         return synth_result
 
     def _run_children(self, child_tasks: list[Task]) -> list[TaskResult]:
-        if not self.parallel_children or len(child_tasks) <= 1:
+        # Cross-provider auto-parallelism: in isolated runs every call has
+        # its own scratch dir, so there is no shared working tree to collide
+        # in -- children can always run concurrently. The per-provider
+        # semaphores do the real scheduling: siblings on the same account
+        # still serialize (rate limits are per seat), while siblings routed
+        # to different providers overlap for free. In --project mode agents
+        # share one tree, so concurrency stays opt-in (--parallel-children).
+        concurrent = self.parallel_children or self.project is None
+        if not concurrent or len(child_tasks) <= 1:
             return [self._dispatch(t) for t in child_tasks]
         with ThreadPoolExecutor(max_workers=len(child_tasks)) as pool:
             return list(pool.map(self._dispatch, child_tasks))
+
+    def _fanout(self, thunks: list) -> list[TaskResult]:
+        """Run independent call thunks, concurrently when there are several.
+        Used for ENSEMBLE's per-node fan-out, where each call goes to a
+        *different* provider by construction -- zero rate-limit contention,
+        so wall-clock drops from sum-of-providers to slowest-provider."""
+        if len(thunks) <= 1:
+            return [t() for t in thunks]
+        with ThreadPoolExecutor(max_workers=len(thunks)) as pool:
+            return [f.result() for f in [pool.submit(t) for t in thunks]]
 
     def _merge_leaf_results(self, task: Task, results: list[TaskResult]) -> TaskResult:
         if len(results) == 1:
