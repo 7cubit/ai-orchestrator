@@ -191,12 +191,14 @@ ensemble fan-out case above):
   failure even if it printed JSON, and child failures propagate to the root
   result instead of being papered over by a clean synthesis call
 
-Marked `# VERIFY:` in `agents.py` — confirm against `<cli> --help` on your
-installed versions before depending on these, since all three CLIs ship
-updates weekly:
+All three wrappers are now verified against live installed CLIs (flags drift
+as these ship weekly — re-check `<cli> --help` after updates):
 
-- Exact JSON-output flag for `codex exec` (used `--full-auto` + best-effort
-  JSON-or-text parsing so it degrades safely either way)
+The `codex` side is verified against codex-cli 0.142.5: `--full-auto` is
+gone from `codex exec`; the wrapper uses `--sandbox workspace-write` and
+captures the final message via `--output-last-message` (stdout carries the
+whole transcript plus token accounting). `gpt-5.5` confirmed live on a
+ChatGPT seat.
 
 The `agy` side is verified against agy 1.0.14: `--print`, `--model` with the
 display-name string from `agy models` (reasoning level included, e.g.
