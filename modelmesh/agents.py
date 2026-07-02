@@ -13,8 +13,10 @@ re-checking against `<cli> --help` before you lean on it for real work.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
@@ -86,24 +88,45 @@ class ClaudeCodeAgent(Agent):
 
 
 class CodexAgent(Agent):
-    """Wraps `codex exec` -- Codex CLI's non-interactive automation mode."""
+    """Wraps `codex exec` -- Codex CLI's non-interactive automation mode.
+
+    Flags verified against codex-cli 0.142.5: `--full-auto` is gone from
+    exec; sandboxing is `-s/--sandbox` (workspace-write confines writes to
+    the call's cwd, which pairs with the per-call workdir isolation), and
+    `--output-last-message` captures the final message cleanly -- stdout
+    carries the whole transcript plus token accounting, so parsing stdout
+    alone is noisy. (`schema` is Claude-only for now; JSON is requested in
+    the prompt, and parse_subtasks degrades gracefully.)"""
 
     def run(self, prompt: str, schema: Optional[dict] = None) -> RunOutcome:
         if not shutil.which("codex"):
             return self._missing_binary("codex")
-        cmd = [
-            "codex", "exec",
-            "-m", self.spec.model,
-            "-c", f'model_reasoning_effort="{self.spec.effort}"',
-            "--full-auto",  # unattended, confined to its own workdir
-            prompt,
-        ]
-        # VERIFY: confirm the current JSON-output flag for `codex exec` on your
-        # installed version (`codex exec --help`). json_optional=True means we
-        # parse plain stdout as a fallback, so this degrades safely either way.
-        # (`schema` is Claude-only for now; JSON is requested in the prompt.)
-        return _run(cmd, self.timeout, result_key="result", json_optional=True,
-                    cwd=self.workdir)
+        fd, last_message_path = tempfile.mkstemp(prefix="codex-last-", suffix=".txt")
+        os.close(fd)
+        try:
+            cmd = [
+                "codex", "exec",
+                "-m", self.spec.model,
+                "-c", f'model_reasoning_effort="{self.spec.effort}"',
+                "--sandbox", "workspace-write",  # unattended, writes confined to cwd
+                "--output-last-message", last_message_path,
+                prompt,
+            ]
+            outcome = _run(cmd, self.timeout, result_key="result",
+                           json_optional=True, cwd=self.workdir)
+            try:
+                with open(last_message_path) as f:
+                    last_message = f.read().strip()
+                if last_message:
+                    outcome.output = last_message
+            except OSError:
+                pass  # keep the (noisier) stdout we already captured
+            return outcome
+        finally:
+            try:
+                os.unlink(last_message_path)
+            except OSError:
+                pass
 
 
 class AgyAgent(Agent):
