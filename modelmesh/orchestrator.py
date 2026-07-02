@@ -32,10 +32,13 @@ from .config import (
     TIER_CONFIG,
 )
 from .prompts import (
+    CLARIFY_SCHEMA,
     REVIEW_SCHEMA,
     SUBTASK_SCHEMA,
+    clarify_prompt,
     decompose_prompt,
     leaf_prompt,
+    parse_clarify,
     parse_review,
     parse_subtasks,
     retry_task_description,
@@ -63,6 +66,7 @@ class Orchestrator:
         prefer: Optional[str] = None,
         verbose: bool = False,
         run_timeout: int = RUN_TIMEOUT_SECONDS,
+        clarify: bool = True,
     ):
         self.mode = mode
         self.dry_run = dry_run
@@ -83,6 +87,11 @@ class Orchestrator:
         # propagate up through the normal failure path.
         self.run_timeout = run_timeout
         self._deadline: Optional[float] = None
+        # Pre-flight ambiguity triage: one cheap reasoning call before the
+        # tree dispatches. Interactive terminal -> ask the operator;
+        # headless -> adopt the model's stated default assumptions and
+        # surface them. Never blocks or fails a run; --no-clarify skips it.
+        self.clarify = clarify
         self.review = review
         self.max_retries = max_retries
         # A real repo to work in: every agent call runs with this as its cwd
@@ -138,6 +147,11 @@ class Orchestrator:
             time.monotonic() + self.run_timeout if self.run_timeout else None
         )
 
+        # Pin down intent before spending the whole tree on a guess. The
+        # clarified task (with operator answers or adopted assumptions
+        # folded in) is what every tier -- including review -- works from.
+        big_task = self._clarify(big_task)
+
         # Quality loop: dispatch, have the orchestrator model review the
         # integrated result for hallucinated/unsupported content and gaps,
         # and re-dispatch with the reviewer's issues folded into the task
@@ -172,6 +186,69 @@ class Orchestrator:
             + ("; ".join(result.review["issues"]) or "quality below the bar")
         )
         return result
+
+    def _clarify(self, big_task: str) -> str:
+        """Pre-flight triage: one restricted reasoning call decides whether
+        the task is executable without guessing at intent. Materially
+        ambiguous + interactive terminal -> ask the operator (blank answer
+        adopts the stated default). Headless -> adopt the model's default
+        assumptions, print them to stderr, and fold them into the task as
+        binding constraints. A failed or unparseable triage never blocks."""
+        if not self.clarify:
+            return big_task
+        spec = self.tier_config[Tier.ORCHESTRATOR][0]
+        probe = Task(description=big_task, tier=Tier.ORCHESTRATOR)
+        call = self._call(spec, probe, clarify_prompt(big_task),
+                          schema=CLARIFY_SCHEMA, kind="clarify")
+        if not call.success:
+            self._progress("clarify call failed; proceeding with the task as given")
+            return big_task
+        parsed = parse_clarify(call.output)
+        if parsed is None or parsed["clear"] or not parsed["questions"]:
+            return big_task
+        questions, assumptions = parsed["questions"], parsed["assumptions"]
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            print(
+                "\nBefore dispatching, pin down intent (blank answer = "
+                "adopt the stated default):"
+            )
+            lines = []
+            for i, q in enumerate(questions):
+                default = assumptions[i] if i < len(assumptions) else None
+                hint = f"\n     [default: {default}]" if default else ""
+                try:
+                    answer = input(f"  {i + 1}. {q}{hint}\n     > ").strip()
+                except EOFError:
+                    answer = ""
+                if not answer:
+                    answer = default or (
+                        "unanswered; use your best judgment and state the "
+                        "choice made"
+                    )
+                lines.append(f"- Q: {q}\n  A: {answer}")
+            return (
+                big_task
+                + "\n\nClarifications from the operator (binding):\n"
+                + "\n".join(lines)
+            )
+        adopted = [
+            f"- {assumptions[i]}" if i < len(assumptions)
+            else f"- unresolved question, use best judgment: {q}"
+            for i, q in enumerate(questions)
+        ]
+        print(
+            "modelmesh: task is ambiguous and no terminal is attached; "
+            "proceeding under explicit assumptions:\n" + "\n".join(adopted),
+            file=sys.stderr, flush=True,
+        )
+        return (
+            big_task
+            + "\n\nNo operator was available to answer clarifying "
+              "questions. Proceed under these explicit assumptions, treat "
+              "them as binding constraints, and restate them in the final "
+              "result:\n"
+            + "\n".join(adopted)
+        )
 
     def _review(self, big_task: str, result: TaskResult) -> dict:
         spec = self.tier_config[Tier.ORCHESTRATOR][0]
@@ -384,6 +461,7 @@ class Orchestrator:
                     parent_id=task.task_id,
                     depth=task.depth + 1,
                     preferred_provider=st.provider,
+                    verify=st.verify,
                 )
                 for st in subtasks
             ]

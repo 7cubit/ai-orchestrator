@@ -125,6 +125,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                               "lean on abundant ChatGPT quota). Overrides "
                               "strength routing; failover still uses the "
                               "others on timeout/error")
+    parser.add_argument("--no-clarify", action="store_true",
+                         help="Skip the pre-flight ambiguity triage (one "
+                              "cheap reasoning call: in a terminal it asks "
+                              "up to 3 clarifying questions; headless it "
+                              "adopts stated default assumptions and prints "
+                              "them to stderr -- it never blocks)")
     parser.add_argument("--no-review", action="store_true",
                          help="Skip the orchestrator's post-synthesis quality/"
                               "hallucination review (and its retries)")
@@ -192,6 +198,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         prefer=args.prefer,
         verbose=args.verbose,
         run_timeout=args.run_timeout,
+        clarify=not args.no_clarify,
     )
 
     if args.task is None:

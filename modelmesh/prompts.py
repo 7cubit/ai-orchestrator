@@ -51,12 +51,28 @@ SUBTASK_SCHEMA = {
                         "enum": list(MODEL_PROFILES),
                     },
                     "needs_decomposition": {"type": "boolean"},
+                    # One concrete check proving the slice is done. Optional
+                    # in the schema so a model that omits it doesn't fail the
+                    # decompose; the prompt asks for it emphatically.
+                    "verify": {"type": "string"},
                 },
                 "required": ["task", "provider", "needs_decomposition"],
             },
         }
     },
     "required": ["subtasks"],
+}
+
+# Pre-flight triage: is the task specified well enough to execute without
+# guessing at intent? questions/assumptions are index-paired.
+CLARIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "clear": {"type": "boolean"},
+        "questions": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["clear"],
 }
 
 # Verdict schema for the orchestrator's post-synthesis quality review.
@@ -78,6 +94,9 @@ class ParsedSubtask:
     # straight to a coding-tier agent (the cheap path). Defaults to True so a
     # reply that omits it behaves like the pre-adaptive-depth pipeline.
     needs_decomposition: bool = True
+    # The slice's definition of done (see SUBTASK_SCHEMA); None when the
+    # model didn't supply one.
+    verify: Optional[str] = None
 
 
 def decompose_prompt(
@@ -116,10 +135,40 @@ def decompose_prompt(
         f"{max_fanout} concrete, independent subtasks. Each subtask should "
         f"be self-contained enough that an agent with no other context could "
         f"act on it directly.\n\n"
+        f"Slice vertically, not horizontally: each subtask must deliver one "
+        f"complete, independently verifiable behavior or fix end-to-end -- "
+        f"its code, its wiring, and its check -- never one architectural "
+        f"layer of many behaviors (all-the-models / all-the-endpoints / "
+        f"all-the-UI is the wrong cut). If a subtask can only be tested "
+        f"after some other subtask lands, the split is wrong: re-cut it. "
+        f'For every subtask include "verify": the single concrete check '
+        f"that proves that slice is done -- a command to run, a test that "
+        f"must pass, or an observable behavior. Carry any constraints from "
+        f"the task (error handling, security requirements, compatibility) "
+        f"into the text of every subtask they apply to; subtasks are "
+        f"executed by agents who see nothing else.\n\n"
         f"{routing}"
         f"Task:\n{task.description}\n\n"
         f'Respond with ONLY JSON in this shape: {{"subtasks": [{{"task": '
-        f'"...", "provider": "...", "needs_decomposition": true}}, ...]}}. '
+        f'"...", "provider": "...", "needs_decomposition": true, '
+        f'"verify": "..."}}, ...]}}. No prose before or after the JSON.'
+    )
+
+
+def clarify_prompt(task_description: str) -> str:
+    return (
+        f"You are triaging a task before an expensive unattended multi-agent "
+        f"run. Decide whether it is specified well enough to execute without "
+        f"guessing at intent. Only material ambiguities count: ones whose "
+        f"answer would change what gets built or fixed, which code is in "
+        f"scope, or how success is judged. Style choices and details a "
+        f"competent agent can decide are NOT material -- do not ask about "
+        f"them.\n\n"
+        f"Task:\n{task_description}\n\n"
+        f'Respond with ONLY JSON. If executable as-is: {{"clear": true}}. '
+        f'Otherwise: {{"clear": false, "questions": ["..."], "assumptions": '
+        f'["..."]}} -- at most 3 questions, each paired by index with the '
+        f"reasonable default assumption to adopt if nobody can answer. "
         f"No prose before or after the JSON."
     )
 
@@ -173,10 +222,40 @@ WORKDIR_GUARDRAIL = (
 )
 
 
+# Standing quality bar appended to every coding-tier prompt, so all three
+# providers work to the same expectations regardless of how terse the
+# decomposed subtask text is. Kept compact -- it rides on every leaf call.
+CODING_QUALITY_CHARTER = (
+    "\n\nQuality bar for this work:"
+    "\n- Debug to the root cause before changing code; a fix that silences "
+    "a symptom without explaining it is a failure."
+    "\n- Handle errors deliberately: fail loudly on impossible states, "
+    "handle expected failures (I/O, network, user input, missing files) "
+    "explicitly, and never swallow an exception without stating why."
+    "\n- Treat external input as untrusted: validate at boundaries; never "
+    "interpolate untrusted text into shell commands, SQL, or markup; never "
+    "hard-code or log secrets."
+    "\n- Match the repository's existing style, naming, and idioms; keep "
+    "the change minimal and focused on this subtask."
+    "\n- Report honestly: state exactly what you verified (commands run, "
+    "tests passed, behavior observed) and what you could not verify."
+)
+
+
 def leaf_prompt(task: Task) -> str:
-    """The prompt handed to a coding-tier agent: the subtask description
-    plus the stay-in-your-workdir guardrail."""
-    return task.description + WORKDIR_GUARDRAIL
+    """The prompt handed to a coding-tier agent: the subtask description,
+    its definition of done (when the decomposer supplied one), the standing
+    quality charter, and the stay-in-your-workdir guardrail."""
+    verify_block = ""
+    if task.verify:
+        verify_block = (
+            f"\n\nDefinition of done -- this subtask is complete only when "
+            f"this check passes: {task.verify}\n"
+            f"Run or observe that check yourself if you can and report its "
+            f"actual outcome; if you cannot run it, say so explicitly "
+            f"instead of claiming success."
+        )
+    return task.description + verify_block + CODING_QUALITY_CHARTER + WORKDIR_GUARDRAIL
 
 
 def synthesize_prompt(task: Task, children: list[TaskResult]) -> str:
@@ -219,11 +298,13 @@ def parse_subtasks(raw_output: str) -> list[ParsedSubtask]:
                 desc = str(item.get("task") or item.get("description") or "").strip()
                 provider = item.get("provider")
                 needs = item.get("needs_decomposition")
+                verify = item.get("verify")
                 if desc:
                     parsed.append(ParsedSubtask(
                         desc,
                         provider if isinstance(provider, str) else None,
                         needs if isinstance(needs, bool) else True,
+                        verify.strip() if isinstance(verify, str) and verify.strip() else None,
                     ))
             elif str(item).strip():
                 parsed.append(ParsedSubtask(str(item).strip()))
@@ -237,6 +318,23 @@ def parse_subtasks(raw_output: str) -> list[ParsedSubtask]:
         return [ParsedSubtask(re.sub(r"^\d+[.)]\s*", "", ln)) for ln in bulleted]
 
     return [ParsedSubtask(text)] if text else []
+
+
+def parse_clarify(raw_output: str) -> Optional[dict]:
+    """Extract the triage verdict. Returns {"clear": bool, "questions":
+    [...], "assumptions": [...]} (index-paired, capped at 3) or None when
+    no verdict can be found -- callers treat None as 'clear' so a chatty
+    triage reply can never block or degrade a run."""
+    for data in _json_candidates(raw_output):
+        if isinstance(data, dict) and isinstance(data.get("clear"), bool):
+            qs = data.get("questions")
+            asm = data.get("assumptions")
+            return {
+                "clear": data["clear"],
+                "questions": [str(q) for q in qs[:3]] if isinstance(qs, list) else [],
+                "assumptions": [str(a) for a in asm[:3]] if isinstance(asm, list) else [],
+            }
+    return None
 
 
 def parse_review(raw_output: str) -> Optional[dict]:

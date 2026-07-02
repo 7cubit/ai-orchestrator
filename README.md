@@ -61,6 +61,41 @@ modelmesh "Refactor the billing module and add tests" --prefer codex
   the coding tier (most of the volume) is gpt-**5.4**. `--prefer codex`
   exercises both.
 
+## Clarify first, slice vertically, verify each slice
+
+Three quality mechanisms run before and inside every decomposition:
+
+**Pre-flight clarifying questions.** Before the tree dispatches, one cheap
+restricted reasoning call triages the task: is it specified well enough to
+execute without guessing at intent? Material ambiguities only — things that
+change what gets built or how success is judged. In a terminal, you get up
+to 3 questions (blank answer = adopt the stated default); running headless
+or backgrounded, the run never blocks — it adopts the model's default
+assumptions, prints them to stderr, folds them into the task as binding
+constraints, and instructs the final result to restate them. A failed or
+unparseable triage proceeds as-is; `--no-clarify` skips it entirely.
+
+**Vertical-slice decomposition.** Decomposers are instructed to cut
+subtasks as complete, independently verifiable behaviors end-to-end (code +
+wiring + check), never as architectural layers ("all the models / all the
+endpoints / all the UI") — a layer split means no subtask is testable alone
+and parallel agents produce mismatched pieces. Constraints from the parent
+task (error handling, security requirements, compatibility) must be carried
+into the text of every subtask they apply to, since leaf agents see nothing
+else.
+
+**Per-slice `verify` + a standing quality charter.** Every decomposed
+subtask carries a `"verify"` field — one concrete check (a command, a test,
+an observable behavior) proving that slice is done — which rides down into
+the coding agent's prompt as its definition of done, with an instruction to
+actually run the check and report the real outcome (or say it couldn't).
+Every coding-tier prompt also carries `CODING_QUALITY_CHARTER`
+(`prompts.py`): root-cause before patching, deliberate error handling,
+untrusted-input hygiene at boundaries, match the repo's idiom, and honest
+reporting of what was and wasn't verified. Together with the review gate,
+this closes the loop: the decomposer defines "done", the coder proves it,
+the reviewer rejects claims that weren't.
+
 ## Adaptive depth (why SECOND exists but isn't always used)
 
 Depth costs money: every extra tier adds a decompose call, a synthesis call,

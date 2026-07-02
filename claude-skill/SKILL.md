@@ -5,9 +5,10 @@ description: Delegate one genuinely big task (whole-repo bug-fix sweep, 100k+ LO
 
 # modelmesh — hierarchical multi-model orchestration
 
-`modelmesh` (binary: `~/.local/bin/modelmesh`; source: `~/Downloads/ai-orchestrator`,
-editable install, GitHub `7cubit/ai-orchestrator`) dispatches one task down a
-tier tree and synthesizes results back up:
+`modelmesh` (binary: `~/.local/bin/modelmesh`; source:
+`~/7cubit Projects/Orchestrator/ai-orchestrator`, editable install, GitHub
+`7cubit/ai-orchestrator`) dispatches one task down a tier tree and
+synthesizes results back up:
 
 ```
 ORCHESTRATOR  claude-fable-5
@@ -37,12 +38,22 @@ rejects hallucinated reports and re-dispatches with feedback.
 
 ## How to call it
 
-Always through Bash, and for real runs ALWAYS in the background — a run takes
-10–30+ minutes and prints nothing until the tree finishes:
+Always through Bash, and for real runs ALWAYS in the background — a run
+takes 10–30+ minutes. Pass `--verbose` so the log shows live per-call
+progress instead of silence:
 
 ```bash
-modelmesh "<one self-contained task description>" [flags]
+modelmesh "<one self-contained task description>" --verbose [flags]
 ```
+
+Clarify-first behavior: a pre-flight triage call may find the task
+ambiguous. Backgrounded runs never block on questions — they adopt stated
+default assumptions and print them to stderr as "proceeding under explicit
+assumptions". Check the log for that block and ALWAYS relay adopted
+assumptions to the user with the result. Better: resolve obvious
+ambiguities yourself (ask the user one line if needed) BEFORE launching, so
+the prompt you pass is already concrete — what "done" means, which files
+are in scope, how to verify.
 
 Working directory: like claude/codex/agy, the project defaults to the
 current directory — agents run (and edit files) wherever the command is
@@ -58,7 +69,10 @@ Key flags:
 - `--dry-run` — free structural preview (stub responses, no tokens).
 - `--json` — machine-readable result tree (use when you need to parse).
 - `--max-fanout N` (default 3), `--timeout S` (per call, default 600),
+  `--run-timeout S` (whole-run budget, default 3600, 0 = off),
   `--max-retries N` (review-gate re-dispatches, default 1), `--no-review`,
+  `--no-clarify` (skip the pre-flight ambiguity triage),
+  `--prefer claude|codex|agy` (lean on one seat's quota),
   `--mode ensemble` (all providers per node — 3x cost, only when the user
   wants cross-model verification).
 - Bare `modelmesh` opens a human REPL — never use that form from a session.

@@ -39,6 +39,11 @@ class Task:
     # MODEL_STRENGTHS. None (or a provider not configured at this tier)
     # falls back to round-robin. Ignored in ENSEMBLE mode.
     preferred_provider: Optional[str] = None
+    # Definition of done assigned by the parent's decompose call: one
+    # concrete check (a command, a test, an observable behavior) that
+    # proves this slice is complete. Rides down to the leaf prompt so the
+    # coding agent verifies its own work instead of just claiming success.
+    verify: Optional[str] = None
 
 
 @dataclass
