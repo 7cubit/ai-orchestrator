@@ -5,10 +5,16 @@ description: Delegate one genuinely big task (whole-repo bug-fix sweep, 100k+ LO
 
 # modelmesh — hierarchical multi-model orchestration
 
-`modelmesh` (binary: `~/.local/bin/modelmesh`; source:
-`~/7cubit Projects/Orchestrator/ai-orchestrator`, editable install, GitHub
+`modelmesh` (the `modelmesh` binary on PATH; an editable install of GitHub
 `7cubit/ai-orchestrator`) dispatches one task down a tier tree and
-synthesizes results back up:
+synthesizes results back up. The source checkout's location varies per
+machine — never assume a path. If you need the source (maintenance only;
+running tasks never requires it), resolve it from the install itself, e.g.:
+
+```bash
+grep -rho "/[^']*ai-orchestrator[^']*" \
+  ~/.local/share/uv/tools/modelmesh/lib/python*/site-packages/__editable__*.py | head -1
+```
 
 ```
 ORCHESTRATOR  claude-fable-5
