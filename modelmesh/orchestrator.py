@@ -20,6 +20,7 @@ from .agents import build_agent
 from .config import (
     AgentSpec,
     DispatchMode,
+    MAX_FANOUT,
     MAX_QUALITY_RETRIES,
     PROVIDER_CONCURRENCY,
     TIER_CONFIG,
@@ -55,7 +56,10 @@ class Orchestrator:
     ):
         self.mode = mode
         self.dry_run = dry_run
-        self.max_fanout = max_fanout
+        # MAX_FANOUT is the hard ceiling; a caller can ask for less but not
+        # more, so one node can never fan out past it however --max-fanout
+        # is set. (Previously MAX_FANOUT was defined but never enforced.)
+        self.max_fanout = max(1, min(max_fanout, MAX_FANOUT))
         self.timeout = timeout
         self.max_turns = max_turns
         self.parallel_children = parallel_children
@@ -217,10 +221,20 @@ class Orchestrator:
             # Adaptive depth: a subtask one coding agent can finish skips
             # straight to the (cheap) coding tier; only work that genuinely
             # needs another round of division goes to the next tier down.
+            #
+            # Exception: the ORCHESTRATOR's own split always feeds MAIN, even
+            # if the model marked a subtask "no decomposition needed".
+            # Otherwise a whole-repo task could collapse to a single coding
+            # call -- wasting the orchestrator pass entirely and never
+            # engaging the MAIN/SECOND tiers where the other providers live.
             child_tasks = [
                 Task(
                     description=st.description,
-                    tier=lower if st.needs_decomposition else Tier.CODING,
+                    tier=(
+                        lower
+                        if (st.needs_decomposition or task.tier is Tier.ORCHESTRATOR)
+                        else Tier.CODING
+                    ),
                     parent_id=task.task_id,
                     depth=task.depth + 1,
                     preferred_provider=st.provider,

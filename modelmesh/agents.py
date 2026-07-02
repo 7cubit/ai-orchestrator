@@ -70,8 +70,11 @@ class ClaudeCodeAgent(Agent):
     def run(self, prompt: str, schema: Optional[dict] = None) -> RunOutcome:
         if not shutil.which("claude"):
             return self._missing_binary("claude")
+        # The prompt goes in via stdin, never as an argv element, so a
+        # model-generated task that starts with "-" can't be reparsed as a
+        # flag (argument injection). Same pattern in every wrapper below.
         cmd = [
-            "claude", "-p", prompt,
+            "claude", "-p",
             "--model", self.spec.model,
             # Claude Code falls back to the closest supported level if the
             # active model doesn't support the exact one requested, so it's
@@ -84,7 +87,8 @@ class ClaudeCodeAgent(Agent):
         ]
         if schema is not None:
             cmd += ["--json-schema", json.dumps(schema)]
-        return _run(cmd, self.timeout, result_key="result", cwd=self.workdir)
+        return _run(cmd, self.timeout, result_key="result", cwd=self.workdir,
+                    stdin_input=prompt)
 
 
 class CodexAgent(Agent):
@@ -109,11 +113,13 @@ class CodexAgent(Agent):
                 "-m", self.spec.model,
                 "-c", f'model_reasoning_effort="{self.spec.effort}"',
                 "--sandbox", "workspace-write",  # unattended, writes confined to cwd
+                "--skip-git-repo-check",  # scratch workdirs aren't git repos
                 "--output-last-message", last_message_path,
-                prompt,
+                # no positional prompt -> codex reads it from stdin
             ]
             outcome = _run(cmd, self.timeout, result_key="result",
-                           json_optional=True, cwd=self.workdir)
+                           json_optional=True, cwd=self.workdir,
+                           stdin_input=prompt)
             try:
                 with open(last_message_path) as f:
                     last_message = f.read().strip()
@@ -143,14 +149,14 @@ class AgyAgent(Agent):
         if not shutil.which("agy"):
             return self._missing_binary("agy")
         cmd = [
-            "agy", "--print", prompt,
+            "agy", "--print",
             "--model", self.spec.model,
             "--print-timeout", f"{self.timeout}s",
             # unattended, confined to its own workdir
             "--dangerously-skip-permissions",
         ]
         return _run(cmd, self.timeout, result_key="response", json_optional=True,
-                    cwd=self.workdir)
+                    cwd=self.workdir, stdin_input=prompt)
 
 
 class MockAgent(Agent):
@@ -173,10 +179,12 @@ def _run(
     result_key: str,
     json_optional: bool = False,
     cwd: Optional[str] = None,
+    stdin_input: Optional[str] = None,
 ) -> RunOutcome:
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+            input=stdin_input,
         )
     except subprocess.TimeoutExpired:
         return RunOutcome(output="", success=False, error=f"timed out after {timeout}s")

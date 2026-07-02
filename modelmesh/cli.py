@@ -8,7 +8,7 @@ import os
 import sys
 from typing import Optional
 
-from .config import DispatchMode, MAX_QUALITY_RETRIES
+from .config import DispatchMode, MAX_FANOUT, MAX_QUALITY_RETRIES
 from .orchestrator import Orchestrator
 from .tasks import TaskResult
 
@@ -47,7 +47,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--dry-run", action="store_true",
                          help="Skip real CLI calls; use canned stub responses")
     parser.add_argument("--mode", choices=["route", "ensemble"], default="route")
-    parser.add_argument("--max-fanout", type=int, default=3)
+    parser.add_argument("--max-fanout", type=int, default=MAX_FANOUT,
+                         help=f"Max subtasks per node (hard-capped at "
+                              f"MAX_FANOUT={MAX_FANOUT} in config)")
     parser.add_argument("--parallel-children", action="store_true",
                          help="Fan out child tasks concurrently (mind provider rate limits)")
     parser.add_argument("--timeout", type=int, default=600)

@@ -214,6 +214,27 @@ bundle unrelated asks in one run (each gets shallower attention than it
 would alone); and don't leave success undefined ("make it better") — the
 review gate can only reject what the prompt lets it measure.
 
+## Security model & known limitations
+
+modelmesh runs vendor CLIs unattended with their permission prompts disabled
+(`claude --permission-mode bypassPermissions`, `agy
+--dangerously-skip-permissions`; only `codex --sandbox workspace-write` is
+OS-enforced, and only for writes). A self-audit
+(`docs/SECURITY_AUDIT.md`) documents the consequences; the load-bearing ones:
+
+- **The per-call working directory is a starting cwd, not a sandbox.** With
+  permissions bypassed, `claude` and `agy` agents can read/write outside it.
+  Treat every run as "this could touch anything the invoking user can" —
+  run against a branch, review the diff, and don't point `--project` at a
+  tree you can't afford an agent to edit.
+- **Don't point `--project` at modelmesh's own source.** It's an editable
+  install, so the running code *is* the checkout; an agent editing it plants
+  changes that run on the next invocation.
+- **Prompts now go to the CLIs via stdin, not argv**, so a model-generated
+  subtask beginning with `-` can no longer be reparsed as a flag (the former
+  argument-injection gap). Repo/LLM text still flows between agent prompts
+  unsanitized — a known tradeoff of the decompose→synthesize design.
+
 ## Rate limits are the real constraint here, not the code
 
 The code above is the easy part — maybe a day to get right, plus ongoing
