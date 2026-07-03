@@ -136,7 +136,14 @@ PROVIDER_CONCURRENCY: dict[str, int] = {
 MAX_FANOUT = 3
 
 DEFAULT_TIMEOUT_SECONDS = 600
-DEFAULT_MAX_TURNS = 15
+# Governs coding-tier calls (reasoning calls are separately capped at
+# REASONING_MAX_TURNS below). 15 was too low: a real coding slice -- read an
+# 800-line handler, study test patterns, write tests, run them, fix, re-run --
+# needs 20-40 turns. A live tokylomail run showed Sonnet coding calls burning
+# 70k tokens over 12 min then failing at the cap (error_max_turns), while
+# failover salvaged the work on codex/agy. Headroom is bounded by the per-call
+# --timeout and the aggregate --run-timeout, so a higher ceiling can't run away.
+DEFAULT_MAX_TURNS = 40
 
 # Decompose, synthesize, and review calls are single-shot text->JSON work;
 # they don't need the coding tier's turn budget or timeout. Giving them the
