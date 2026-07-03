@@ -206,7 +206,15 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     result = orchestrator.run(args.task)
     _emit(result, as_json=args.json)
+    _emit_cost(orchestrator)
     return 0 if result.success else 1
+
+
+def _emit_cost(orchestrator: Orchestrator) -> None:
+    # stderr, right before exit -- never contaminates --json stdout piping.
+    report = orchestrator.cost_report()
+    if report:
+        print(report, file=sys.stderr, flush=True)
 
 
 def _emit(result: TaskResult, *, as_json: bool) -> None:
@@ -257,6 +265,7 @@ def _repl(orchestrator: Orchestrator, args: argparse.Namespace) -> int:
             print("\n[run interrupted -- back at the prompt]")
             continue
         _emit(result, as_json=args.json)
+        _emit_cost(orchestrator)
 
 
 if __name__ == "__main__":

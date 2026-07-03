@@ -58,6 +58,9 @@ class TaskResult:
     children: list["TaskResult"] = field(default_factory=list)
     error: Optional[str] = None
     raw: Optional[dict] = None  # parsed JSON from the CLI, when available
+    # Wall-clock seconds this call spent inside the provider semaphore
+    # (queue wait excluded). Feeds the end-of-run cost report.
+    elapsed: Optional[float] = None
     # Root result only: the orchestrator's post-synthesis quality review
     # ({"verdict": "accept"|"retry", "issues": [...], "attempts": N}).
     review: Optional[dict] = None

@@ -75,6 +75,11 @@ assumptions, prints them to stderr, folds them into the task as binding
 constraints, and instructs the final result to restate them. A failed or
 unparseable triage proceeds as-is; `--no-clarify` skips it entirely.
 
+**Sibling-slice context.** Each dispatched child carries a one-line digest
+of its sibling slices ("context only — do NOT do their work"), so parallel
+agents stop duplicating or contradicting each other's changes. Digests use
+only each description's first line, so they never nest as trees deepen.
+
 **Vertical-slice decomposition.** Decomposers are instructed to cut
 subtasks as complete, independently verifiable behaviors end-to-end (code +
 wiring + check), never as architectural layers ("all the models / all the
@@ -150,6 +155,12 @@ your Claude, ChatGPT, and Google seats are independent accounts. So:
   Ensemble *decompose* calls are concurrent even in `--project` mode — they
   run read-only since the least-privilege change, so they can't collide in
   the tree.
+- **ENSEMBLE merges by majority.** A merged leaf succeeds when strictly
+  more than half its providers succeeded — one stalled provider no longer
+  discards two good answers. Failed providers contribute a one-line error
+  stub to the merged output, never their raw output (a crash transcript is
+  pure token cost to every tier above); their full results stay attached
+  as children for the `--json` record.
 - **`--project` runs stay sequential by default.** Coding agents there
   share one real working tree; concurrent edits can collide, so concurrency
   remains opt-in via `--parallel-children`.
@@ -161,6 +172,13 @@ your Claude, ChatGPT, and Google seats are independent accounts. So:
 20-minute run is distinguishable from a hung one and you can see exactly
 which call is sitting on the clock. stdout is untouched, so `--json` output
 stays parseable.
+
+Every run ends with a **cost report on stderr** (never stdout, so `--json`
+piping stays clean): calls, ok/fail, agent-time, and output tokens per
+provider:model — exact where the CLI reported usage, otherwise estimated
+at chars/4 and marked `~`. It covers every call including clarify,
+decompose, synthesize, and review, so you can finally see where a run's
+budget actually went.
 
 Independently of `--verbose`, every run writes the same progress lines
 (timestamped, plus the task and final status) to a durable per-run log at
@@ -184,9 +202,22 @@ After the tree synthesizes, the ORCHESTRATOR model reviews the integrated
 result against the original task with a skeptic's prompt: findings, files,
 metrics, or benchmark figures that the work couldn't actually have verified
 are grounds for rejection — an audit report that *sounds* authoritative but
-invents specifics is a `retry`, not an `accept`. On `retry`, the whole tree
-re-dispatches with the reviewer's concrete issues folded into the task
-("do not repeat these failures"), up to `--max-retries` times (default 1;
+invents specifics is a `retry`, not an `accept`.
+
+The reviewer also sees a **verify ledger**: every slice's binding
+`verify` definition-of-done paired with the last 1,500 characters of that
+agent's report (checks run at the end — the tail carries the evidence, the
+rest of the log is token waste). A slice that claims completion without
+evidence its check actually ran is mechanically catchable, and the
+reviewer can name the offending slices by id.
+
+On `retry` with named `failed_task_ids`, the run performs a **surgical
+retry**: only those branches re-dispatch (with the issues folded into
+their descriptions), every other branch's cached result is reused, and
+only the affected ancestor syntheses re-run — the biggest token/latency
+saving in the loop, since one bad slice no longer costs a whole-tree
+re-dispatch. Unmatched or absent ids fall back to the guaranteed
+full-tree retry, up to `--max-retries` times (default 1;
 `MAX_QUALITY_RETRIES` in config). If the reviewer still rejects after the
 last retry, the run reports failure with the issues rather than shipping
 flagged content. `--no-review` skips the loop; an unparseable or failed

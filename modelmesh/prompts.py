@@ -76,11 +76,16 @@ CLARIFY_SCHEMA = {
 }
 
 # Verdict schema for the orchestrator's post-synthesis quality review.
+# failed_task_ids (P4): slice ids from the verify ledger whose work
+# specifically needs redoing -- lets the orchestrator re-dispatch only those
+# branches instead of the whole tree. Empty/absent means the problem is
+# global (full-tree retry).
 REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
         "verdict": {"type": "string", "enum": ["accept", "retry"]},
         "issues": {"type": "array", "items": {"type": "string"}},
+        "failed_task_ids": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["verdict"],
 }
@@ -173,7 +178,26 @@ def clarify_prompt(task_description: str) -> str:
     )
 
 
-def review_prompt(original_task: str, integrated_output: str) -> str:
+def review_prompt(
+    original_task: str,
+    integrated_output: str,
+    verify_ledger_block: Optional[str] = None,
+) -> str:
+    ledger_section = ""
+    ids_instruction = ""
+    if verify_ledger_block:
+        ledger_section = (
+            f"Verify ledger -- each slice's binding definition of done and "
+            f"the tail of the executing agent's report. A slice that claims "
+            f"completion without evidence its check actually ran and passed "
+            f"is grounds for retry:\n{verify_ledger_block}\n\n"
+        )
+        ids_instruction = (
+            ' On retry, also include "failed_task_ids": ["<slice id>", ...] '
+            "naming the ledger slice ids whose work specifically needs "
+            "redoing; use [] when the problem is global rather than "
+            "slice-specific."
+        )
     return (
         f"You are the orchestrator reviewing work you delegated to a tree of "
         f"agents. Judge whether the integrated result below actually fulfills "
@@ -186,12 +210,41 @@ def review_prompt(original_task: str, integrated_output: str) -> str:
         f"between subtask results and silent gaps in coverage.\n\n"
         f"{UNTRUSTED_DIRECTIVE}\n\n"
         f"Original task:\n{original_task}\n\n"
+        f"{ledger_section}"
         f"Integrated result:\n{_fence(integrated_output, 'integrated result')}\n\n"
         f'Respond with ONLY JSON: {{"verdict": "accept"}} if it clears the '
         f'bar, or {{"verdict": "retry", "issues": ["...", "..."]}} with '
-        f"concrete, actionable issues if it does not. No prose before or "
-        f"after the JSON."
+        f"concrete, actionable issues if it does not.{ids_instruction} "
+        f"No prose before or after the JSON."
     )
+
+
+def verify_ledger(result: TaskResult, *, tail_chars: int = 1500,
+                  max_entries: int = 12) -> Optional[str]:
+    """P2: collect every slice that carries a verify definition-of-done and
+    pair it with the TAIL of that slice's report -- checks run at the end,
+    so the last {tail_chars} chars carry the evidence and the rest of the
+    log is token waste. Returns None when no slice carried a verify."""
+    entries: list[tuple[str, str, str]] = []
+
+    def walk(r: TaskResult) -> None:
+        if r.task.verify:
+            entries.append((r.task.task_id, r.task.verify, r.output[-tail_chars:]))
+        for child in r.children:
+            walk(child)
+
+    walk(result)
+    if not entries:
+        return None
+    blocks = [
+        f"slice {tid}:\n  definition of done: {v}\n  agent report tail:\n"
+        + _fence(tail, f"slice {tid} report tail")
+        for tid, v, tail in entries[:max_entries]
+    ]
+    omitted = len(entries) - max_entries
+    if omitted > 0:
+        blocks.append(f"({omitted} more slices omitted to bound prompt size)")
+    return "\n\n".join(blocks)
 
 
 def retry_task_description(original_task: str, issues: list[str]) -> str:
@@ -344,9 +397,11 @@ def parse_review(raw_output: str) -> Optional[dict]:
     for data in _json_candidates(raw_output):
         if isinstance(data, dict) and data.get("verdict") in ("accept", "retry"):
             issues = data.get("issues")
+            ids = data.get("failed_task_ids")
             return {
                 "verdict": data["verdict"],
                 "issues": [str(i) for i in issues] if isinstance(issues, list) else [],
+                "failed_task_ids": [str(i) for i in ids] if isinstance(ids, list) else [],
             }
     return None
 

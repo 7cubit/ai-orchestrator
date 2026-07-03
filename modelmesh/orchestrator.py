@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock, Semaphore
 from typing import Optional
 
-from .agents import build_agent
+from .agents import build_agent, clip
 from .config import (
     AgentSpec,
     DispatchMode,
@@ -44,6 +44,7 @@ from .prompts import (
     retry_task_description,
     review_prompt,
     synthesize_prompt,
+    verify_ledger,
 )
 from .tasks import Task, TaskResult, Tier, next_tier
 
@@ -95,6 +96,10 @@ class Orchestrator:
         # Durable per-run progress log (see _open_run_log).
         self._log_fh = None
         self._log_lock = Lock()
+        # P7: every agent call appends one row here; cost_report() renders
+        # it at the end of a run. Reset per run. (list.append is atomic
+        # under the GIL, so parallel children need no extra lock.)
+        self._ledger: list[dict] = []
         self.review = review
         self.max_retries = max_retries
         # A real repo to work in: every agent call runs with this as its cwd
@@ -150,6 +155,7 @@ class Orchestrator:
             time.monotonic() + self.run_timeout if self.run_timeout else None
         )
         self._open_run_log(big_task)
+        self._ledger = []
         try:
             result = self._run_task(big_task)
             self._log(
@@ -173,15 +179,21 @@ class Orchestrator:
         big_task = self._clarify(big_task)
 
         # Quality loop: dispatch, have the orchestrator model review the
-        # integrated result for hallucinated/unsupported content and gaps,
-        # and re-dispatch with the reviewer's issues folded into the task
-        # until it accepts or retries run out.
+        # integrated result, and retry until it accepts or retries run out.
+        # P4: when the reviewer names specific failed_task_ids, only those
+        # branches re-dispatch -- everything else is reused from the cached
+        # tree and only the ancestor syntheses re-run. Unmatched or absent
+        # ids fall back to the guaranteed full-tree retry.
         description = big_task
         attempts = 1 + (self.max_retries if self.review else 0)
         result: TaskResult
+        patched: Optional[TaskResult] = None
         for attempt in range(1, attempts + 1):
-            root = Task(description=description, tier=Tier.ORCHESTRATOR)
-            result = self._dispatch(root)
+            if patched is not None:
+                result, patched = patched, None
+            else:
+                root = Task(description=description, tier=Tier.ORCHESTRATOR)
+                result = self._dispatch(root)
             if not self.review or not result.success:
                 return result
             review = self._review(big_task, result)
@@ -197,6 +209,12 @@ class Orchestrator:
                     + ("; ".join(review["issues"]) or "quality below the bar")
                 )
                 return result
+            if attempt < attempts and review.get("failed_task_ids"):
+                patched = self._retry_branches(
+                    result, review["failed_task_ids"], review["issues"]
+                )
+                if patched is not None:
+                    continue
             description = retry_task_description(big_task, review["issues"])
         # Retries exhausted with the reviewer still unconvinced: surface
         # that rather than shipping content flagged as weak or fabricated.
@@ -270,10 +288,119 @@ class Orchestrator:
             + "\n".join(adopted)
         )
 
+    def _retry_branches(
+        self, root_result: TaskResult, failed_ids: list[str], issues: list[str]
+    ) -> Optional[TaskResult]:
+        """P4: surgical retry. Re-dispatch ONLY the reviewer-named slices
+        (with the issues folded into their descriptions), keep every other
+        branch's cached result, and re-run synthesis bottom-up along the
+        affected ancestor paths only. Returns the patched root, or None when
+        the ids don't map cleanly onto the tree -- the caller then falls
+        back to the full-tree retry, so a hallucinated id can never strand
+        a run."""
+        index: dict[str, tuple[TaskResult, Optional[TaskResult]]] = {}
+
+        def walk(r: TaskResult, parent: Optional[TaskResult]) -> None:
+            index[r.task.task_id] = (r, parent)
+            for child in r.children:
+                walk(child, r)
+
+        walk(root_result, None)
+        targets: list[tuple[TaskResult, TaskResult]] = []
+        for fid in failed_ids:
+            hit = index.get(fid.strip())
+            if hit is None or hit[1] is None:
+                # Unknown id, or the root itself -> whole tree anyway.
+                self._progress(
+                    f"partial retry: id {fid!r} doesn't map to a branch; "
+                    f"falling back to full-tree retry"
+                )
+                return None
+            targets.append(hit)  # (result, parent)
+
+        # A target nested under another target is covered by re-dispatching
+        # the ancestor; keep only the outermost ones.
+        target_ids = {r.task.task_id for r, _ in targets}
+
+        def covered_by_ancestor(r: TaskResult) -> bool:
+            parent = index[r.task.task_id][1]
+            while parent is not None:
+                if parent.task.task_id in target_ids:
+                    return True
+                parent = index[parent.task.task_id][1]
+            return False
+
+        targets = [(r, p) for r, p in targets if not covered_by_ancestor(r)]
+
+        affected_parents: list[TaskResult] = []
+        any_failed = False
+        for old, parent in targets:
+            self._progress(
+                f"partial retry: re-dispatching slice {old.task.task_id} "
+                f"({old.task.tier.value}); {len(index) - 1} other nodes reused"
+            )
+            fresh_task = Task(
+                description=retry_task_description(old.task.description, issues),
+                tier=old.task.tier,
+                parent_id=parent.task.task_id,
+                depth=old.task.depth,
+                preferred_provider=old.task.preferred_provider,
+                verify=old.task.verify,
+            )
+            fresh = self._dispatch(fresh_task)
+            any_failed = any_failed or not fresh.success
+            slot = next(
+                i for i, c in enumerate(parent.children) if c is old
+            )
+            parent.children[slot] = fresh
+            affected_parents.append(parent)
+
+        # Re-synthesize along affected ancestor chains, deepest first, so
+        # each parent integrates its children's CURRENT outputs. Unaffected
+        # branches contribute their cached outputs -- no re-dispatch.
+        seen: set[str] = set()
+        chain: list[TaskResult] = []
+        for parent in affected_parents:
+            node: Optional[TaskResult] = parent
+            while node is not None:
+                nid = node.task.task_id
+                if nid not in seen:
+                    seen.add(nid)
+                    chain.append(node)
+                node = index[nid][1]
+        chain.sort(key=lambda r: r.task.depth, reverse=True)
+        for node in chain:
+            tier_providers = {s.provider for s in self.tier_config[node.task.tier]}
+            synth = self._call_with_failover(
+                node.task,
+                synthesize_prompt(node.task, node.children),
+                node.provider if node.provider in tier_providers else None,
+                kind="synthesize",
+            )
+            synth.children = node.children
+            grand = index[node.task.task_id][1]
+            if grand is None:
+                root_result = synth
+            else:
+                slot = next(i for i, c in enumerate(grand.children) if c is node)
+                grand.children[slot] = synth
+            index[node.task.task_id] = (synth, grand)
+            any_failed = any_failed or not synth.success
+        if any_failed and root_result.success:
+            root_result.success = False
+            root_result.error = "partial retry left failed branches"
+        return root_result
+
     def _review(self, big_task: str, result: TaskResult) -> dict:
         spec = self.tier_config[Tier.ORCHESTRATOR][0]
+        # P2: the reviewer sees each slice's definition of done next to the
+        # tail of that agent's report, so "claimed done, never ran the
+        # check" is mechanically catchable -- and (P4) it can name the
+        # specific slice ids that need redoing.
         call = self._call(
-            spec, result.task, review_prompt(big_task, result.output),
+            spec, result.task,
+            review_prompt(big_task, result.output,
+                          verify_ledger_block=verify_ledger(result)),
             schema=REVIEW_SCHEMA, kind="review",
         )
         # A reviewer that failed or answered unparseably must not wedge the
@@ -284,6 +411,50 @@ class Orchestrator:
         if parsed is None:
             return {"verdict": "accept", "issues": [], "note": "review verdict unparseable; accepted unreviewed"}
         return parsed
+
+    def cost_report(self) -> str:
+        """P7: render the run's call ledger -- calls, outcomes, agent-time,
+        and output tokens per provider:model. Token counts are exact where
+        the CLI reported usage, otherwise estimated at chars/4 and marked
+        with ~. Agent-time is time inside provider semaphores; with
+        parallelism it exceeds wall-clock by design."""
+        if not self._ledger:
+            return ""
+        rows: dict[str, list] = {}
+        for entry in self._ledger:
+            key = f"{entry['provider']}:{entry['model']}"
+            row = rows.setdefault(key, [0, 0, 0, 0.0, 0, True])
+            row[0] += 1
+            row[1] += 1 if entry["success"] else 0
+            row[2] += 0 if entry["success"] else 1
+            row[3] += entry["elapsed"]
+            row[4] += entry["tokens"]
+            row[5] = row[5] and entry["exact"]
+        width = max(len(k) for k in rows) + 2
+        lines = [
+            "--- run cost ---",
+            f"{'provider:model'.ljust(width)}calls   ok fail  agent-time  out-tokens",
+        ]
+        tot = [0, 0, 0, 0.0, 0, True]
+        for key in sorted(rows):
+            r = rows[key]
+            for i in range(5):
+                tot[i] += r[i]
+            tot[5] = tot[5] and r[5]
+            mark = "" if r[5] else "~"
+            lines.append(
+                f"{key.ljust(width)}{r[0]:5d} {r[1]:4d} {r[2]:4d}"
+                f"{r[3]:10.0f}s  {mark}{r[4]:,}"
+            )
+        mark = "" if tot[5] else "~"
+        lines.append(
+            f"{'TOTAL'.ljust(width)}{tot[0]:5d} {tot[1]:4d} {tot[2]:4d}"
+            f"{tot[3]:10.0f}s  {mark}{tot[4]:,}"
+        )
+        lines.append(
+            "(~ = tokens estimated at chars/4 where the CLI reported no usage)"
+        )
+        return "\n".join(lines)
 
     # -- internals ------------------------------------------------------
 
@@ -395,6 +566,7 @@ class Orchestrator:
                 task=task, provider=spec.provider, model=spec.model,
                 effort=spec.effort, output="", success=False,
                 error=f"not started: run deadline of {self.run_timeout}s exceeded",
+                elapsed=0.0,
             )
         if self.project:
             call_dir = self.project
@@ -430,6 +602,17 @@ class Orchestrator:
             f"{label} {'done' if outcome.success else f'FAILED ({outcome.error})'} "
             f"in {elapsed:.0f}s"
         )
+        # P7 cost row: exact output tokens when the CLI reported usage,
+        # otherwise the chars/4 heuristic (flagged as estimated).
+        usage = (outcome.raw or {}).get("usage") or {}
+        reported = usage.get("output_tokens")
+        exact = isinstance(reported, (int, float)) and reported > 0
+        self._ledger.append({
+            "provider": spec.provider, "model": spec.model, "kind": kind,
+            "success": outcome.success, "elapsed": elapsed,
+            "tokens": int(reported) if exact else len(outcome.output) // 4,
+            "exact": exact,
+        })
         return TaskResult(
             task=task,
             provider=spec.provider,
@@ -439,6 +622,7 @@ class Orchestrator:
             success=outcome.success,
             error=outcome.error,
             raw=outcome.raw,
+            elapsed=elapsed,
         )
 
     def _dispatch(self, task: Task) -> TaskResult:
@@ -518,6 +702,24 @@ class Orchestrator:
                 )
                 for st in subtasks
             ]
+            # P6: each child gets a one-line digest of its sibling slices --
+            # enough to avoid duplicating or conflicting with their work,
+            # cheap enough (one clipped line per sibling) not to matter in
+            # tokens. Digest uses only the description's FIRST line, so
+            # sibling blocks never nest into grandchildren's digests.
+            if len(child_tasks) > 1:
+                first_lines = [
+                    ct.description.splitlines()[0][:160] for ct in child_tasks
+                ]
+                for i, ct in enumerate(child_tasks):
+                    others = "\n".join(
+                        f"- {line}" for j, line in enumerate(first_lines) if j != i
+                    )
+                    ct.description += (
+                        "\n\nParallel sibling slices (context only -- do NOT "
+                        "do their work; avoid duplicating or conflicting "
+                        "with them):\n" + others
+                    )
             all_children.extend(self._run_children(child_tasks))
 
         if not all_children:
@@ -589,18 +791,47 @@ class Orchestrator:
     def _merge_leaf_results(self, task: Task, results: list[TaskResult]) -> TaskResult:
         if len(results) == 1:
             return results[0]
-        # ENSEMBLE at the coding tier: concatenate rather than silently drop
-        # data. Build a *new* wrapper result instead of reusing results[0] --
+        # ENSEMBLE at the coding tier. P8: majority semantics -- one stalled
+        # provider out of three must not discard two good answers (the old
+        # success=all(...) did exactly that). Strictly >50% succeeding counts
+        # as success; below that the merge is an honest failure.
+        #
+        # Token discipline: only SUCCESSFUL outputs are merged for the parent
+        # tier. A failed provider contributes one stub line (its error,
+        # clipped) -- never its raw output, so a 10k-token crash transcript
+        # can't ride into every synthesis prompt above. The full failed
+        # results stay attached as children for the tree/--json record.
+        #
+        # Build a *new* wrapper result instead of reusing results[0] --
         # reusing it would make that result its own child and recurse forever
         # the moment anything walks the tree (learned this one the hard way).
-        combined = "\n\n".join(f"[{r.provider}:{r.model}]\n{r.output}" for r in results)
+        ok = [r for r in results if r.success]
+        failed = [r for r in results if not r.success]
+        majority = len(ok) > len(results) / 2
+        parts = [f"[{r.provider}:{r.model}]\n{r.output}" for r in ok]
+        parts += [
+            f"[{r.provider}:{r.model}] FAILED: "
+            + clip(r.error or "unknown error", 200)
+            for r in failed
+        ]
+        header = ""
+        if ok and failed:
+            header = (
+                f"NOTE: {len(ok)} of {len(results)} ensemble providers "
+                f"succeeded; failed providers are listed below but their "
+                f"raw output was excluded.\n\n"
+            )
         providers = "+".join(sorted({r.provider for r in results}))
         return TaskResult(
             task=task,
             provider=providers,
             model="ensemble",
             effort="ensemble",
-            output=combined,
-            success=all(r.success for r in results),
+            output=header + "\n\n".join(parts),
+            success=majority,
+            error=None if majority else (
+                "ensemble majority failed: "
+                + "; ".join(f"{r.provider}({r.error})" for r in failed)
+            ),
             children=results,
         )
