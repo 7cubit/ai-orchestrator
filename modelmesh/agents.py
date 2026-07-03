@@ -221,6 +221,26 @@ def _run(
     return outcome
 
 
+def _json_failure_reason(data: dict, proc) -> str:
+    """Surface WHY an in-band JSON failure happened. Claude Code's JSON puts
+    the machine-readable cause in `subtype` (e.g. error_max_turns,
+    error_during_execution) and often a human message in `result`/`error` --
+    without these, every failure flattens to 'CLI reported failure (exit N)'
+    and max-turns exhaustion is indistinguishable from a rate limit or a
+    crash. Prefer the specific signals; fall back to stderr, then a generic."""
+    subtype = data.get("subtype")
+    detail = data.get("error") or data.get("message")
+    if not isinstance(detail, str) or not detail.strip():
+        # `result` sometimes carries the human-readable failure text.
+        res = data.get("result")
+        detail = res if isinstance(res, str) and res.strip() else None
+    if isinstance(subtype, str) and subtype and subtype != "success":
+        return f"{subtype}" + (f": {detail.strip()[:200]}" if detail else "")
+    if detail:
+        return detail.strip()[:200]
+    return proc.stderr.strip() or f"CLI reported failure (exit {proc.returncode})"
+
+
 def _run_impl(
     cmd: list[str],
     timeout: int,
@@ -273,9 +293,7 @@ def _run_impl(
         return RunOutcome(
             output=text,
             success=ok,
-            error=None if ok else (
-                proc.stderr.strip() or f"CLI reported failure (exit {proc.returncode})"
-            ),
+            error=None if ok else _json_failure_reason(data, proc),
             raw=data,
         )
     except json.JSONDecodeError:
