@@ -99,8 +99,23 @@ Key flags:
 4. Verify before relaying: run the tests yourself for code changes; for
    reports, spot-check at least two cited file:line claims. A non-zero exit
    means the review gate rejected the result — report that honestly.
-5. Relay the final output plus the call tree (it shows which provider ran
-   each subtask, which the user cares about for quota reasons).
+5. Code review gate (code runs into a repo that uses CodeRabbit — check for
+   a `.coderabbit.yaml`): modelmesh's own review only checks the synthesized
+   *text* for hallucination; it never reads the diff. So for real code
+   changes, add an external code review before calling the task done:
+   - Open a PR from the `modelmesh/<topic>` branch into the CodeRabbit base
+     branch (`main` per `.coderabbit.yaml`); its auto-review fires on the PR.
+     (Re-trigger on demand by commenting `@coderabbitai review`.)
+   - Wait for CodeRabbit's review, then read its findings. Fold any real
+     ones back in: fix directly if small, or fire a *targeted* follow-up
+     `modelmesh` run scoped to just those findings (feed the exact
+     file:line comments in as the task). Don't merge past unaddressed
+     high-severity findings.
+   - This complements the internal review (anti-hallucination) with actual
+     diff-level code review; the two are not redundant.
+6. Relay the final output plus the call tree (it shows which provider ran
+   each subtask, which the user cares about for quota reasons), and note the
+   CodeRabbit outcome (clean / findings addressed / findings outstanding).
 
 ## Cost shape (why restraint matters)
 
