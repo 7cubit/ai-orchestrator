@@ -34,8 +34,9 @@ def _fence(content: str, label: str) -> str:
 
 # Forces decomposition calls into strict JSON: the orchestrator passes this
 # to every decompose call, and ClaudeCodeAgent forwards it via
-# `claude --json-schema`. Codex/Gemini accept and ignore it (JSON is still
-# requested in the prompt text below, and parse_subtasks degrades gracefully).
+# `claude --json-schema`. Codex/Gemini/Kimi accept and ignore it (JSON is
+# still requested in the prompt text below, and parse_subtasks degrades
+# gracefully).
 SUBTASK_SCHEMA = {
     "type": "object",
     "properties": {

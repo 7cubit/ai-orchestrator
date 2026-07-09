@@ -1,17 +1,17 @@
 # modelmesh
 
 Hierarchical multi-model orchestration across **Claude Code**, **Codex CLI**,
-and **Antigravity (`agy`)** — riding your existing subscriptions rather than
-API keys.
+**Antigravity (`agy`)**, and **Kimi Code (`kimi`)** — riding your existing
+subscriptions rather than API keys.
 
 ```
 ORCHESTRATOR   claude-fable-5 (high)
       |
-MAIN           claude-opus-4-8 (max)  |  gpt-5.5 (xhigh)  |  agy: Gemini 3.1 Pro (High)
+MAIN           claude-opus-4-8 (max)  |  gpt-5.5 (xhigh)  |  agy: Gemini 3.1 Pro (High)  |  kimi: K2.7 Code (high)
       |
-SECOND         claude-opus-4-8 (high) |  gpt-5.5 (high)   |  agy: Gemini 3.1 Pro (High)
+SECOND         claude-opus-4-8 (high) |  gpt-5.5 (high)   |  agy: Gemini 3.1 Pro (High)  |  kimi: K2.7 Code (high)
       |
-CODING         claude-sonnet-5 (max)  |  gpt-5.4 (xhigh)  |  agy: Gemini 3.5 Flash (High)
+CODING         claude-sonnet-5 (max)  |  gpt-5.4 (xhigh)  |  agy: Gemini 3.5 Flash (High)|  kimi: K2.7 Code (max)
 ```
 
 A "big task" enters at ORCHESTRATOR and results synthesize back up the same
@@ -52,8 +52,9 @@ modelmesh "Refactor the billing module and add tests" --prefer codex
 
 - `--prefer codex` routes MAIN, SECOND, and CODING to the ChatGPT models
   (gpt-5.5 at the planning tiers, gpt-5.4 at coding), overriding the
-  per-subtask strength routing. The ORCHESTRATOR tier is Fable-5-only, so it
-  is unaffected.
+  per-subtask strength routing. `--prefer kimi` routes those same tiers to
+  `kimi-code/kimi-for-coding` (K2.7 Code). The ORCHESTRATOR tier is
+  Fable-5-only, so it is unaffected.
 - **Failover still applies:** if the preferred provider times out or errors,
   the call falls over to the other providers as usual — so `--prefer` leans
   on a seat without becoming a single point of failure.
@@ -150,8 +151,8 @@ your Claude, ChatGPT, and Google seats are independent accounts. So:
   (`PROVIDER_CONCURRENCY`), different-seat siblings overlap. At most one
   call per seat is in flight — the same account pressure as a sequential
   run, finished sooner.
-- **ENSEMBLE fan-out is concurrent.** A node that calls all three providers
-  now takes as long as the slowest one instead of the sum of all three.
+- **ENSEMBLE fan-out is concurrent.** A node that calls every provider
+  now takes as long as the slowest one instead of the sum of all of them.
   Ensemble *decompose* calls are concurrent even in `--project` mode — they
   run read-only since the least-privilege change, so they can't collide in
   the tree.
@@ -225,15 +226,17 @@ review call accepts-with-a-note instead of wedging the run into retries.
 
 ## Why this is buildable at all
 
-Claude Code, Codex CLI, and the Antigravity CLI all officially support
-running headless off a personal subscription login instead of a metered API
-key:
+Claude Code, Codex CLI, the Antigravity CLI, and the Kimi Code CLI all
+officially support running headless off a personal subscription login instead
+of a metered API key:
 
 - Claude: `claude login`, then `claude -p "..." --model ... --effort ...`
 - Codex: sign in with your ChatGPT account on first run, then `codex exec ...`
 - Antigravity: sign in with your Google account, then
   `agy -p "..." --model "Gemini 3.1 Pro (High)"` — the reasoning level is
   part of the model string, exactly as `agy models` lists it
+- Kimi: run `kimi login` to authenticate, then
+  `kimi -p "..." --model kimi-code/kimi-for-coding --output-format stream-json`
 
 None of this reverse-engineers a web UI the way some "free API" tricks for
 consumer chat products do — these three are purpose-built CLIs designed for
@@ -261,6 +264,8 @@ cp claude-skill/SKILL.md ~/.claude/skills/modelmesh/SKILL.md
    - `codex` — `npm install -g @openai/codex`, then run `codex` once to sign in
    - `agy` — the Antigravity CLI; run `agy` once to sign in with your Google
      account, then `agy models` to see which models your seat serves
+   - `kimi` — the Kimi Code CLI; run `kimi login` to authenticate via the
+     device-code flow, then `kimi provider list` to confirm the default model
 2. `pip install -e .` from this directory (or just run it in place — there
    are no third-party dependencies).
 3. Try it with no CLIs installed at all first:
@@ -307,7 +312,7 @@ by spinning up the whole tree.
 The project is wherever you're standing. Open a terminal inside a repo (or a
 VS Code terminal, which drops you there already) and every agent call runs
 with that directory as its cwd — same muscle memory as `claude`, `codex`,
-and `agy`:
+`agy`, and `kimi`:
 
 ```bash
 cd ~/code/myapp && git checkout -b modelmesh/bugfix
@@ -394,19 +399,19 @@ review gate can only reject what the prompt lets it measure.
 
 modelmesh runs coding-tier agents unattended with their permission prompts
 disabled (`claude --permission-mode bypassPermissions`, `agy
---dangerously-skip-permissions`, `codex --sandbox workspace-write`). A
-self-audit (`docs/SECURITY_AUDIT.md`) documents the consequences; the
-hardening it drove, and what still stands:
+--dangerously-skip-permissions`, `codex --sandbox workspace-write`, `kimi
+--yolo`). A self-audit (`docs/SECURITY_AUDIT.md`) documents the consequences;
+the hardening it drove, and what still stands:
 
 - **Least privilege by call kind (MM-01/02, MM-07).** Only leaf coding work
   runs with the permission bypass. Decompose/synthesize/review calls run
   restricted — claude in default mode (reads work headless, writes/bash are
-  denied), `codex --sandbox read-only`, `agy --sandbox` — verified live
-  against all three CLIs.
+  denied), `codex --sandbox read-only`, `agy --sandbox`, `kimi` without
+  `--yolo` — verified live against all four CLIs.
 - **Agents get an allowlisted environment, not your shell's (MM-08).**
   `ENV_ALLOWLIST` in `config.py` passes PATH/HOME/locale/proxy vars only;
   credentials like `ANTHROPIC_API_KEY` are stripped (verified with a canary
-  secret). All three CLIs authenticate from their own state under HOME. If
+  secret). All four CLIs authenticate from their own state under HOME. If
   you want API-key burst billing, add the key to the allowlist deliberately.
 - **The per-call working directory is still a starting cwd, not a sandbox,
   for the coding tier.** A bypassed coding agent can read/write outside it.
@@ -454,14 +459,14 @@ one-sentence task:
 python -m modelmesh "Build a REST API" --dry-run --mode ensemble
 ```
 
-That one task produces **27 separate coding-tier model calls** (3 providers
+That one task produces **36 separate coding-tier model calls** (4 providers
 x 3 second-tier subtasks x 3 coding-tier subtasks), on top of the decompose
 and synthesis calls at every level above it. `--mode route` (the default)
-avoids this by picking one provider per node instead of all three, and
+avoids this by picking one provider per node instead of all four, and
 `MAX_FANOUT` in `config.py` caps how wide any single node can branch — but
 even a disciplined tree that's 3-wide and 4 tiers deep is dozens of calls
-per run, and Opus/GPT-5.5/Gemini 3.1 Pro at high-to-max effort are not fast
-or cheap in tokens even when the seat itself is flat-rate.
+per run, and Opus/GPT-5.5/Gemini 3.1 Pro/K2.7 Code at high-to-max effort are
+not fast or cheap in tokens even when the seat itself is flat-rate.
 
 Concretely, for Claude specifically: **1-3 agents at steady use is where a
 Max subscription is cheapest; 5+ concurrent agents will hit rate limits
@@ -470,8 +475,9 @@ for your primary/interactive path and fail over to `ANTHROPIC_API_KEY`
 billing for burst capacity. `PROVIDER_CONCURRENCY` in `config.py` defaults
 every provider to 1 concurrent call for exactly this reason — raise it only
 after you've watched a real run and know where your account's ceiling is.
-Codex (ChatGPT plan) and Antigravity (rolling usage windows on the Google
-seat) have the same shape of limit even though the exact numbers differ.
+Codex (ChatGPT plan), Antigravity (rolling usage windows on the Google
+seat), and Kimi have the same shape of limit even though the exact numbers
+differ.
 
 **Practical starting point:** run in `--mode route` (one provider per node)
 until the plumbing is solid, and only reach for `--mode ensemble` on the
@@ -496,8 +502,8 @@ ensemble fan-out case above):
   failure even if it printed JSON, and child failures propagate to the root
   result instead of being papered over by a clean synthesis call
 
-All three wrappers are now verified against live installed CLIs (flags drift
-as these ship weekly — re-check `<cli> --help` after updates):
+All four wrappers are intended to be verified against live installed CLIs
+(flags drift as these ship weekly — re-check `<cli> --help` after updates):
 
 The `codex` side is verified against codex-cli 0.142.5: `--full-auto` is
 gone from `codex exec`; the wrapper uses `--sandbox workspace-write` and
@@ -517,14 +523,22 @@ given model doesn't support, Claude Code silently falls back to the closest
 one it does — so the config's `"max"` requests are already safe on models
 that top out lower.
 
+The `kimi` side uses `kimi -p <prompt> --output-format stream-json`, with
+`--model kimi-code/kimi-for-coding` and `--yolo` for unattended coding work.
+The wrapper parses the newline-delimited JSON stream and keeps only
+`"role":"assistant"` content lines. There is no native CLI timeout, so the
+Python subprocess timeout enforces the budget; there is no `--json-schema`
+flag, so structured output is prompt-based like Codex/Gemini. Re-check
+`kimi --help` after updates.
+
 ## An alternative worth knowing about: let Claude Code orchestrate natively
 
-This package treats all three CLIs symmetrically, as leaf subprocess calls
+This package treats all four CLIs symmetrically, as leaf subprocess calls
 under one Python dispatcher. There's a second, lower-effort architecture: run
 Fable 5 interactively (or via `claude -p`) as the actual orchestrator, give it
 Bash access, and let its own native subagent system (the `Task` tool) handle
 the Claude-side fan-out — with Python only stepping in at the points where a
-Claude subagent needs to shell out to `codex` or `agy`. Claude Code
+Claude subagent needs to shell out to `codex`, `agy`, or `kimi`. Claude Code
 already provides the agent loop, retries, and context isolation for the
 Claude tiers for free; you'd only be writing the Codex/Antigravity bridge, not the
 whole tree. Worth prototyping alongside this if you want to compare effort

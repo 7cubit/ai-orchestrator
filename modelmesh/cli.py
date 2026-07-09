@@ -117,9 +117,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                               "purely generative tasks)")
     parser.add_argument("--providers", default=None,
                          help="Comma-separated subset of providers to use, "
-                              "e.g. 'claude' if codex/agy aren't "
+                              "e.g. 'claude' if codex/agy/kimi aren't "
                               "installed yet")
-    parser.add_argument("--prefer", default=None, choices=["claude", "codex", "agy"],
+    parser.add_argument("--prefer", default=None, choices=["claude", "codex", "agy", "kimi"],
                          help="Bias routing toward one provider wherever it's "
                               "configured at a tier (e.g. --prefer codex to "
                               "lean on abundant ChatGPT quota). Overrides "

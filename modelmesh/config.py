@@ -15,7 +15,7 @@ from .tasks import Tier
 
 @dataclass(frozen=True)
 class AgentSpec:
-    provider: str   # "claude" | "codex" | "agy"
+    provider: str   # "claude" | "codex" | "agy" | "kimi"
     model: str      # the CLI-facing model id/alias
     effort: str     # provider-specific reasoning/effort/thinking level
     speed: str = "medium"  # "fast" | "medium" | "slow" -- relative wall-clock;
@@ -44,21 +44,25 @@ TIER_CONFIG: dict[Tier, list[AgentSpec]] = {
         AgentSpec("claude", "claude-opus-4-8", "max", speed="slow"),
         AgentSpec("codex", "gpt-5.5", "xhigh", speed="medium"),
         AgentSpec("agy", "Gemini 3.1 Pro (High)", "high", speed="medium"),
+        AgentSpec("kimi", "kimi-code/kimi-for-coding", "high", speed="medium"),
     ],
     Tier.SECOND: [
         AgentSpec("claude", "claude-opus-4-8", "high", speed="slow"),
         AgentSpec("codex", "gpt-5.5", "high", speed="medium"),
         AgentSpec("agy", "Gemini 3.1 Pro (High)", "high", speed="medium"),
+        AgentSpec("kimi", "kimi-code/kimi-for-coding", "high", speed="medium"),
     ],
     Tier.CODING: [
         AgentSpec("claude", "claude-sonnet-5", "max", speed="medium"),
         AgentSpec("codex", "gpt-5.4", "xhigh", speed="medium"),
         AgentSpec("agy", "Gemini 3.5 Flash (High)", "high", speed="fast"),
+        AgentSpec("kimi", "kimi-code/kimi-for-coding", "max", speed="fast"),
     ],
 }
-# Note on agy (Antigravity CLI): the reasoning level is baked into the model
-# string -- "Gemini 3.1 Pro (High)" -- exactly as `agy models` lists it, so
-# the effort field above documents intent rather than adding a flag.
+# Note on providers whose reasoning level lives in the model string:
+# - agy: "Gemini 3.1 Pro (High)" is exactly what `agy models` prints.
+# - kimi: "kimi-code/kimi-for-coding" is the installed alias for K2.7 Code;
+#   thinking is configured model-side, so the effort field documents intent.
 
 @dataclass(frozen=True)
 class ModelProfile:
@@ -117,6 +121,18 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         ),
         cost="low (Gemini 3.5 Flash at the coding tier)",
     ),
+    "kimi": ModelProfile(
+        strengths=(
+            "Kimi K2.7 Code: strong coding and long-context work "
+            "(262k context window), good at multi-file refactoring, "
+            "debugging, and reasoning-heavy implementation tasks"
+        ),
+        weaknesses=(
+            "smaller ecosystem of verified agentic benchmarks than Claude; "
+            "prompt-mode output is less structured than Claude Code JSON"
+        ),
+        cost="medium (Kimi K2.7 Code at the coding tier)",
+    ),
 }
 
 # How many *concurrent* subprocess calls each provider account is allowed
@@ -128,6 +144,7 @@ PROVIDER_CONCURRENCY: dict[str, int] = {
     "claude": 1,
     "codex": 1,
     "agy": 1,
+    "kimi": 1,
 }
 
 # Hard cap on how many subtasks any single node is allowed to spawn. Without
@@ -141,7 +158,7 @@ DEFAULT_TIMEOUT_SECONDS = 600
 # 800-line handler, study test patterns, write tests, run them, fix, re-run --
 # needs 20-40 turns. A live tokylomail run showed Sonnet coding calls burning
 # 70k tokens over 12 min then failing at the cap (error_max_turns), while
-# failover salvaged the work on codex/agy. Headroom is bounded by the per-call
+# failover salvaged the work on codex/agy/kimi. Headroom is bounded by the per-call
 # --timeout and the aggregate --run-timeout, so a higher ceiling can't run away.
 DEFAULT_MAX_TURNS = 40
 
