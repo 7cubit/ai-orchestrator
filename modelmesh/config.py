@@ -33,32 +33,61 @@ class DispatchMode(Enum):
 
 
 # --- Your spec, translated directly into config -----------------------------
-# Orchestrator: Fable 5. Fable/Mythos-class models use adaptive thinking only
-# (no manual budget the way Opus/Sonnet have), so "effort" here just carries
-# through Claude Code's own high/max dial rather than a separately-invented one.
+# Orchestrator: Opus 4.8 at max. It owns dispatch and the root decomposition
+# (splitting a task into a tree is a *plan*, not a verdict -- there's no
+# meaningful way for two models to "agree" on one without a reconciliation
+# pass, which is what ENSEMBLE mode already is). The two verdict gates are
+# voted on instead; see DECIDER_CONFIG below.
+#
+# Each non-claude provider appears at exactly one tier, deliberately: kimi
+# carries MAIN, agy's Gemini 3.1 Pro re-divides at SECOND, and agy's Flash
+# does the cheap mechanical work at CODING. SECOND is only engaged for huge
+# subtasks that need re-dividing, which is precisely the whole-repo-digestion
+# case agy's context window is for -- so agy earns that seat on a strength no
+# terminal-agent benchmark measures.
 TIER_CONFIG: dict[Tier, list[AgentSpec]] = {
     Tier.ORCHESTRATOR: [
-        AgentSpec("claude", "claude-fable-5", "high"),
+        AgentSpec("claude", "claude-opus-4-8", "max", speed="slow"),
     ],
     Tier.MAIN: [
         AgentSpec("claude", "claude-opus-4-8", "max", speed="slow"),
-        AgentSpec("codex", "gpt-5.5", "xhigh", speed="medium"),
-        AgentSpec("agy", "Gemini 3.1 Pro (High)", "high", speed="medium"),
+        AgentSpec("codex", "gpt-5.6-sol", "max", speed="medium"),
         AgentSpec("kimi", "kimi-code/kimi-for-coding", "high", speed="medium"),
     ],
     Tier.SECOND: [
         AgentSpec("claude", "claude-opus-4-8", "high", speed="slow"),
-        AgentSpec("codex", "gpt-5.5", "high", speed="medium"),
+        AgentSpec("codex", "gpt-5.6-terra", "high", speed="medium"),
         AgentSpec("agy", "Gemini 3.1 Pro (High)", "high", speed="medium"),
-        AgentSpec("kimi", "kimi-code/kimi-for-coding", "high", speed="medium"),
     ],
     Tier.CODING: [
         AgentSpec("claude", "claude-sonnet-5", "max", speed="medium"),
-        AgentSpec("codex", "gpt-5.4", "xhigh", speed="medium"),
+        AgentSpec("codex", "gpt-5.6-luna", "high", speed="fast"),
         AgentSpec("agy", "Gemini 3.5 Flash (High)", "high", speed="fast"),
-        AgentSpec("kimi", "kimi-code/kimi-for-coding", "max", speed="fast"),
     ],
 }
+
+# The decision panel. Both the pre-flight triage (clarify: is this task
+# executable, or is it guessing at intent?) and the post-synthesis quality
+# gate (review: accept, or retry?) are put to these two rather than decided
+# by a single model.
+#
+# Unanimity is required to PROCEED, so disagreement resolves to the stricter
+# branch -- either voter says "ambiguous" and the operator gets asked; either
+# says "retry" and the tree is re-dispatched. That's why no tie-breaker is
+# needed: a split never has to be adjudicated, only obeyed. Retries stay
+# bounded by MAX_QUALITY_RETRIES.
+#
+# The two voters sit on different providers on purpose. Their errors are
+# decorrelated (different vendor, different training) -- which is the entire
+# point of a second opinion -- and because PROVIDER_CONCURRENCY is per
+# provider, they run concurrently: the panel costs ~one call of wall-clock,
+# not two. Fable is adaptive-thinking-only, so "xhigh" rides Claude Code's
+# own dial rather than a separately-invented budget; on codex it's a real
+# model_reasoning_effort override.
+DECIDER_CONFIG: list[AgentSpec] = [
+    AgentSpec("claude", "claude-fable-5", "xhigh", speed="medium"),
+    AgentSpec("codex", "gpt-5.6-sol", "xhigh", speed="medium"),
+]
 # Note on providers whose reasoning level lives in the model string:
 # - agy: "Gemini 3.1 Pro (High)" is exactly what `agy models` prints.
 # - kimi: "kimi-code/kimi-for-coding" is the installed alias for K2.7 Code;
@@ -105,7 +134,7 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
             "weaker at broad multi-file navigation; terse plans that can "
             "drop stated constraints"
         ),
-        cost="medium (GPT-5.4 at the coding tier)",
+        cost="low-to-medium (GPT-5.6-Luna at the coding tier)",
     ),
     "agy": ModelProfile(
         strengths=(
@@ -198,11 +227,59 @@ SYNTHESIS_CHILD_CHARS = 40_000    # per-child cap inside a synthesis prompt
 
 # MM-11: effort strings are interpolated into a codex -c config override;
 # validate against known tokens so the invariant "effort is always a static
-# config literal" isn't one refactor away from an injection.
-ALLOWED_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+# config literal" isn't one refactor away from an injection. This allowlist
+# answers "is this safe to interpolate", NOT "is this wise to use" -- see
+# the note on "ultra" below for a token that is the former but not the latter.
+#
+# "ultra" is real: gpt-5.6-sol and gpt-5.6-terra both expose it ("maximum
+# reasoning with automatic task delegation"), and it's what OpenAI's
+# TerminalBench 2.1 chart calls "GPT-5.6 Sol Ultra" -- the top bar, ~3 points
+# above plain Sol. Deliberately unused here anyway, for two reasons:
+#
+#   1. It buys that margin by letting Sol run its OWN agent tree. That is
+#      what this package already is. Using it at MAIN would nest a second
+#      orchestrator inside the first and re-decompose the tier below it.
+#   2. PROVIDER_CONCURRENCY counts subprocesses *we* spawn. It cannot see
+#      inside an ultra call that fans out internally, so "codex: 1" would
+#      quietly stop meaning one concurrent codex agent -- defeating the exact
+#      rate-limit ceiling that setting exists to hold.
+#
+# It stays in the allowlist so a deliberate `--prefer`-style experiment can
+# reach it without editing the injection guard, and so asking for it fails
+# loudly (agents.py) rather than silently running at "high". Note it's
+# sol/terra-only: luna, gpt-5.5 and gpt-5.4 cap at xhigh/max.
+ALLOWED_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 
-# After synthesis, the orchestrator model reviews the integrated result
-# against the original task (checking specifically for hallucinated or
-# unsupported content). A "retry" verdict re-dispatches the whole tree with
-# the reviewer's issues fed back in, at most this many times.
+# After synthesis, the decision panel reviews the integrated result against
+# the original task (checking specifically for hallucinated or unsupported
+# content). A "retry" verdict -- which either voter alone can force -- re-
+# dispatches the tree with the pooled issues fed back in, at most this many
+# times.
 MAX_QUALITY_RETRIES = 1
+
+
+def _validate_specs() -> None:
+    """Fail at import on a spec the rest of the package would paper over.
+
+    An unknown effort clamps to "high" at call time and an unknown speed
+    sorts as "medium" -- both silent. A config that quietly reasons two
+    levels below what it says is worse than one that refuses to start, and
+    a typo here is otherwise invisible until you read a token bill."""
+    groups = [(tier.value, specs) for tier, specs in TIER_CONFIG.items()]
+    groups.append(("decider", DECIDER_CONFIG))
+    for label, specs in groups:
+        for spec in specs:
+            where = f"{label} tier: {spec.provider}:{spec.model}"
+            if spec.effort not in ALLOWED_EFFORTS:
+                raise ValueError(
+                    f"{where}: unknown effort {spec.effort!r} "
+                    f"(known: {', '.join(sorted(ALLOWED_EFFORTS))})"
+                )
+            if spec.speed not in SPEED_RANK:
+                raise ValueError(
+                    f"{where}: unknown speed {spec.speed!r} "
+                    f"(known: {', '.join(sorted(SPEED_RANK))})"
+                )
+
+
+_validate_specs()

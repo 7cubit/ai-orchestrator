@@ -5,14 +5,32 @@ Hierarchical multi-model orchestration across **Claude Code**, **Codex CLI**,
 subscriptions rather than API keys.
 
 ```
-ORCHESTRATOR   claude-fable-5 (high)
+ORCHESTRATOR   claude-opus-4-8 (max)                                    <- dispatch + root decompose
       |
-MAIN           claude-opus-4-8 (max)  |  gpt-5.5 (xhigh)  |  agy: Gemini 3.1 Pro (High)  |  kimi: K2.7 Code (high)
+      |        DECISION PANEL: claude-fable-5 (xhigh) + gpt-5.6-sol (xhigh)
+      |        both must agree to proceed; either one can force ask/retry
       |
-SECOND         claude-opus-4-8 (high) |  gpt-5.5 (high)   |  agy: Gemini 3.1 Pro (High)  |  kimi: K2.7 Code (high)
+MAIN           claude-opus-4-8 (max)  |  gpt-5.6-sol (max)   |  kimi: K2.7 Code (high)
       |
-CODING         claude-sonnet-5 (max)  |  gpt-5.4 (xhigh)  |  agy: Gemini 3.5 Flash (High)|  kimi: K2.7 Code (max)
+SECOND         claude-opus-4-8 (high) |  gpt-5.6-terra (high)|  agy: Gemini 3.1 Pro (High)
+      |
+CODING         claude-sonnet-5 (max)  |  gpt-5.6-luna (high) |  agy: Gemini 3.5 Flash (High)
 ```
+
+The two **verdict** gates — the pre-flight ambiguity triage and the
+post-synthesis quality review — are not decided by a single model. Both go to
+a cross-vendor panel, and unanimity is required to *proceed*: if either voter
+calls the task ambiguous you get asked, and if either votes retry the tree is
+re-dispatched. Disagreement resolves to the stricter branch, so a split never
+needs a tie-breaker — only to be obeyed. A voter that errors or answers
+unparseably abstains rather than vetoing, so a dead CLI can't wedge a run.
+The panel sits on two different providers, so its calls run concurrently and
+cost roughly one call of wall-clock rather than two.
+
+The root **decompose** is deliberately *not* voted on: splitting a task into
+a tree is a plan, not a verdict, and two models can't "agree" on one without a
+reconciliation pass — which is what ENSEMBLE mode already does, at ENSEMBLE
+prices. Opus 4.8 owns that alone.
 
 A "big task" enters at ORCHESTRATOR and results synthesize back up the same
 path it was divided along. How deep the division goes is decided per subtask,
@@ -51,10 +69,10 @@ modelmesh "Refactor the billing module and add tests" --prefer codex
 ```
 
 - `--prefer codex` routes MAIN, SECOND, and CODING to the ChatGPT models
-  (gpt-5.5 at the planning tiers, gpt-5.4 at coding), overriding the
-  per-subtask strength routing. `--prefer kimi` routes those same tiers to
-  `kimi-code/kimi-for-coding` (K2.7 Code). The ORCHESTRATOR tier is
-  Fable-5-only, so it is unaffected.
+  (gpt-5.6-sol/terra at the planning tiers, gpt-5.6-luna at coding), overriding the
+  per-subtask strength routing. `--prefer kimi` leans on `kimi-code/kimi-for-coding`
+  (K2.7 Code) wherever it's configured, which is the MAIN tier. The
+  ORCHESTRATOR tier is Opus-4.8-only, so it is unaffected.
 - **Failover still applies:** if the preferred provider times out or errors,
   the call falls over to the other providers as usual — so `--prefer` leans
   on a seat without becoming a single point of failure.
@@ -110,7 +128,7 @@ subtask `needs_decomposition: true|false`:
 
 - **false** — one coding-tier agent can finish it in a focused session. The
   subtask skips every intermediate tier and goes straight to a coding agent
-  (Sonnet 5 / GPT-5.4 / Gemini 3.5 Flash). A small bug-fix can legitimately
+  (Sonnet 5 / GPT-5.6-Luna / Gemini 3.5 Flash). A small bug-fix can legitimately
   run ORCHESTRATOR -> CODING with nothing in between.
 - **true** — the work genuinely spans many files, components, or steps (a
   bug-fix pass or audit over a 200k–500k-line codebase). It drops one tier,
@@ -136,9 +154,10 @@ It's bounded by the number of providers at the tier, so a genuinely broken
 task can't fan out forever — once everyone has failed, the branch fails with
 the full chain recorded (`all providers failed -> claude(timed out...);
 codex(...)`), and a recovered call is tagged `failed over from ...` in the
-tree. The ORCHESTRATOR tier has only one provider (Fable 5), so it has no
+tree. The ORCHESTRATOR tier has only one provider (Opus 4.8), so it has no
 failover — keep its per-call `--timeout` generous. ENSEMBLE mode doesn't fail
-over because it already calls every provider.
+over because it already calls every provider. The decision panel doesn't fail
+over either; a voter that dies abstains and the remaining voters decide.
 
 ## Cross-provider parallelism (free wall-clock, no extra rate-limit risk)
 
@@ -169,7 +188,7 @@ your Claude, ChatGPT, and Google seats are independent accounts. So:
 ## Watching a run, and why planners get a shorter leash
 
 `--verbose` (`-v`) prints one line per agent call to stderr as the run works
-— `[coding] codex:gpt-5.4 work started` / `... done in 94s` — so a
+— `[coding] codex:gpt-5.6-luna work started` / `... done in 94s` — so a
 20-minute run is distinguishable from a hung one and you can see exactly
 which call is sitting on the clock. stdout is untouched, so `--json` output
 stays parseable.
@@ -465,7 +484,7 @@ and synthesis calls at every level above it. `--mode route` (the default)
 avoids this by picking one provider per node instead of all four, and
 `MAX_FANOUT` in `config.py` caps how wide any single node can branch — but
 even a disciplined tree that's 3-wide and 4 tiers deep is dozens of calls
-per run, and Opus/GPT-5.5/Gemini 3.1 Pro/K2.7 Code at high-to-max effort are
+per run, and Opus/GPT-5.6-Sol/Gemini 3.1 Pro/K2.7 Code at high-to-max effort are
 not fast or cheap in tokens even when the seat itself is flat-rate.
 
 Concretely, for Claude specifically: **1-3 agents at steady use is where a
@@ -508,8 +527,8 @@ All four wrappers are intended to be verified against live installed CLIs
 The `codex` side is verified against codex-cli 0.142.5: `--full-auto` is
 gone from `codex exec`; the wrapper uses `--sandbox workspace-write` and
 captures the final message via `--output-last-message` (stdout carries the
-whole transcript plus token accounting). `gpt-5.5` confirmed live on a
-ChatGPT seat.
+whole transcript plus token accounting). `gpt-5.6-sol` (max), `gpt-5.6-terra`
+(high), and `gpt-5.6-luna` (high) each confirmed live on a ChatGPT seat.
 
 The `agy` side is verified against agy 1.0.14: `--print`, `--model` with the
 display-name string from `agy models` (reasoning level included, e.g.
@@ -535,7 +554,7 @@ flag, so structured output is prompt-based like Codex/Gemini. Re-check
 
 This package treats all four CLIs symmetrically, as leaf subprocess calls
 under one Python dispatcher. There's a second, lower-effort architecture: run
-Fable 5 interactively (or via `claude -p`) as the actual orchestrator, give it
+Opus 4.8 interactively (or via `claude -p`) as the actual orchestrator, give it
 Bash access, and let its own native subagent system (the `Task` tool) handle
 the Claude-side fan-out — with Python only stepping in at the points where a
 Claude subagent needs to shell out to `codex`, `agy`, or `kimi`. Claude Code

@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -137,7 +138,22 @@ class CodexAgent(Agent):
             # MM-11: effort is interpolated into a config-override string;
             # keep that safe even if a future refactor stops sourcing it
             # from static config.
-            effort = self.spec.effort if self.spec.effort in ALLOWED_EFFORTS else "high"
+            #
+            # Clamp LOUDLY. config.py validates its own specs at import, so
+            # reaching this branch means the effort came from somewhere else
+            # (a caller, a refactor) -- and a run that silently reasons two
+            # levels below what was asked for is the kind of thing you don't
+            # notice for months. The allowlist stays as the injection guard;
+            # the print is what stops it from doubling as a silent downgrade.
+            effort = self.spec.effort
+            if effort not in ALLOWED_EFFORTS:
+                print(
+                    f"modelmesh: {self.spec.model}: unsupported effort "
+                    f"{effort!r} (known: {', '.join(sorted(ALLOWED_EFFORTS))}); "
+                    f"falling back to 'high'",
+                    file=sys.stderr, flush=True,
+                )
+                effort = "high"
             cmd = [
                 "codex", "exec",
                 "-m", self.spec.model,
