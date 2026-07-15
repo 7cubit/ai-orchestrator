@@ -97,7 +97,10 @@ class ClaudeCodeAgent(Agent):
             return self._missing_binary("claude")
         # The prompt goes in via stdin, never as an argv element, so a
         # model-generated task that starts with "-" can't be reparsed as a
-        # flag (argument injection). Same pattern in every wrapper below.
+        # flag (argument injection). Codex does the same. agy and kimi have
+        # no stdin path and must take the prompt in argv, so they pin it to a
+        # single element (`--print=<prompt>` / `-p <prompt>`) to keep the
+        # same guarantee -- see their wrappers.
         cmd = [
             "claude", "-p",
             "--model", self.spec.model,
@@ -190,13 +193,25 @@ class AgyAgent(Agent):
     `agy models` prints (e.g. "Gemini 3.1 Pro (High)"), with the reasoning
     level baked in -- so spec.effort documents intent rather than adding a
     flag. Output is plain text (no JSON output flag), so parsing is
-    best-effort and `schema` is prompt-only here."""
+    best-effort and `schema` is prompt-only here.
+
+    `--print` TAKES the prompt as its value; it is NOT a boolean flag, and
+    agy does not read the prompt from stdin. Getting this wrong fails
+    silently rather than loudly, which is why it survived: passing `--print`
+    bare and piping the prompt in made --print swallow the following token,
+    so agy answered the *model name* as if it were the prompt, on the
+    default model, with --model never applied and exit status 0."""
 
     def run(self, prompt: str, schema: Optional[dict] = None) -> RunOutcome:
         if not shutil.which("agy"):
             return self._missing_binary("agy")
         cmd = [
-            "agy", "--print",
+            "agy",
+            # `--print=<prompt>`, not `--print <prompt>`: the `=` form keeps
+            # the argument-injection guard that the stdin pattern bought
+            # elsewhere. A model-generated task beginning with "-" stays one
+            # argv element here and can't be reparsed as a flag.
+            f"--print={prompt}",
             "--model", self.spec.model,
             "--print-timeout", f"{self.timeout}s",
             # reasoning calls run sandboxed; only coding work gets the
@@ -204,7 +219,7 @@ class AgyAgent(Agent):
             "--sandbox" if self.restricted else "--dangerously-skip-permissions",
         ]
         return _run(cmd, self.timeout, result_key="response", json_optional=True,
-                    cwd=self.workdir, stdin_input=prompt)
+                    cwd=self.workdir)
 
 
 class KimiAgent(Agent):
