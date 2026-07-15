@@ -478,10 +478,10 @@ one-sentence task:
 python -m modelmesh "Build a REST API" --dry-run --mode ensemble
 ```
 
-That one task produces **36 separate coding-tier model calls** (4 providers
-x 3 second-tier subtasks x 3 coding-tier subtasks), on top of the decompose
-and synthesis calls at every level above it. `--mode route` (the default)
-avoids this by picking one provider per node instead of all four, and
+That one task produces **27 separate coding-tier model calls** (3 providers
+at CODING x 3 second-tier subtasks x 3 coding-tier subtasks), on top of the
+decompose and synthesis calls at every level above it. `--mode route` (the
+default) avoids this by picking one provider per node instead of all three, and
 `MAX_FANOUT` in `config.py` caps how wide any single node can branch — but
 even a disciplined tree that's 3-wide and 4 tiers deep is dozens of calls
 per run, and Opus/GPT-5.6-Sol/Gemini 3.1 Pro/K2.7 Code at high-to-max effort are
