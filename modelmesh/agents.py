@@ -1,10 +1,10 @@
-"""Thin subprocess wrappers around the three vendor CLIs.
+"""Thin subprocess wrappers around the vendor CLIs.
 
 Each wrapper shells out to an *already installed, already logged-in* CLI --
-`claude`, `codex`, or `agy` (Antigravity) -- using the subscription session
-created by `claude login` / `codex` (ChatGPT sign-in) / `agy` (Google
-sign-in). None of this talks to a pay-per-token API key; it rides the same
-seat you already pay for.
+`claude`, `codex`, `agy` (Antigravity), or `kimi` (Kimi Code) -- using the
+subscription session created by `claude login` / `codex` (ChatGPT sign-in) /
+`agy` (Google sign-in) / `kimi login`. None of this talks to a pay-per-token
+API key; it rides the same seat you already pay for.
 
 Flags below are accurate as of the docs pulled while building this scaffold,
 but all three CLIs ship updates fast. Anywhere you see `# VERIFY:` is worth
@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -60,17 +61,17 @@ class Agent(ABC):
         self.timeout = timeout
         self.max_turns = max_turns
         # Each call gets its own working directory so unattended agents
-        # (bypassPermissions / --full-auto) can't stomp each other's files
-        # when children run in parallel. NOTE: for claude/agy this is a
-        # starting cwd, not an OS-enforced boundary (audit MM-05) -- only
+        # (bypassPermissions / --full-auto / --yolo) can't stomp each other's
+        # files when children run in parallel. NOTE: for claude/agy/kimi this
+        # is a starting cwd, not an OS-enforced boundary (audit MM-05) -- only
         # codex's sandbox actually confines writes.
         self.workdir = workdir
         # Least privilege (audit MM-01/MM-02): decompose/synthesize/review
         # calls only reason over text, so they run WITHOUT the vendor's
         # permission bypass -- restricted mode per provider, verified live:
         # claude default mode (read-only tools work, writes/bash are denied
-        # headless), codex --sandbox read-only, agy --sandbox. Only leaf
-        # coding work keeps the unattended bypass.
+        # headless), codex --sandbox read-only, agy --sandbox, kimi without
+        # --yolo. Only leaf coding work keeps the unattended bypass.
         self.restricted = restricted
 
     @abstractmethod
@@ -96,7 +97,10 @@ class ClaudeCodeAgent(Agent):
             return self._missing_binary("claude")
         # The prompt goes in via stdin, never as an argv element, so a
         # model-generated task that starts with "-" can't be reparsed as a
-        # flag (argument injection). Same pattern in every wrapper below.
+        # flag (argument injection). Codex does the same. agy and kimi have
+        # no stdin path and must take the prompt in argv, so they pin it to a
+        # single element (`--print=<prompt>` / `-p <prompt>`) to keep the
+        # same guarantee -- see their wrappers.
         cmd = [
             "claude", "-p",
             "--model", self.spec.model,
@@ -137,7 +141,22 @@ class CodexAgent(Agent):
             # MM-11: effort is interpolated into a config-override string;
             # keep that safe even if a future refactor stops sourcing it
             # from static config.
-            effort = self.spec.effort if self.spec.effort in ALLOWED_EFFORTS else "high"
+            #
+            # Clamp LOUDLY. config.py validates its own specs at import, so
+            # reaching this branch means the effort came from somewhere else
+            # (a caller, a refactor) -- and a run that silently reasons two
+            # levels below what was asked for is the kind of thing you don't
+            # notice for months. The allowlist stays as the injection guard;
+            # the print is what stops it from doubling as a silent downgrade.
+            effort = self.spec.effort
+            if effort not in ALLOWED_EFFORTS:
+                print(
+                    f"modelmesh: {self.spec.model}: unsupported effort "
+                    f"{effort!r} (known: {', '.join(sorted(ALLOWED_EFFORTS))}); "
+                    f"falling back to 'high'",
+                    file=sys.stderr, flush=True,
+                )
+                effort = "high"
             cmd = [
                 "codex", "exec",
                 "-m", self.spec.model,
@@ -174,13 +193,25 @@ class AgyAgent(Agent):
     `agy models` prints (e.g. "Gemini 3.1 Pro (High)"), with the reasoning
     level baked in -- so spec.effort documents intent rather than adding a
     flag. Output is plain text (no JSON output flag), so parsing is
-    best-effort and `schema` is prompt-only here."""
+    best-effort and `schema` is prompt-only here.
+
+    `--print` TAKES the prompt as its value; it is NOT a boolean flag, and
+    agy does not read the prompt from stdin. Getting this wrong fails
+    silently rather than loudly, which is why it survived: passing `--print`
+    bare and piping the prompt in made --print swallow the following token,
+    so agy answered the *model name* as if it were the prompt, on the
+    default model, with --model never applied and exit status 0."""
 
     def run(self, prompt: str, schema: Optional[dict] = None) -> RunOutcome:
         if not shutil.which("agy"):
             return self._missing_binary("agy")
         cmd = [
-            "agy", "--print",
+            "agy",
+            # `--print=<prompt>`, not `--print <prompt>`: the `=` form keeps
+            # the argument-injection guard that the stdin pattern bought
+            # elsewhere. A model-generated task beginning with "-" stays one
+            # argv element here and can't be reparsed as a flag.
+            f"--print={prompt}",
             "--model", self.spec.model,
             "--print-timeout", f"{self.timeout}s",
             # reasoning calls run sandboxed; only coding work gets the
@@ -188,7 +219,56 @@ class AgyAgent(Agent):
             "--sandbox" if self.restricted else "--dangerously-skip-permissions",
         ]
         return _run(cmd, self.timeout, result_key="response", json_optional=True,
-                    cwd=self.workdir, stdin_input=prompt)
+                    cwd=self.workdir)
+
+
+class KimiAgent(Agent):
+    """Wraps `kimi -p` -- the Kimi Code CLI's headless prompt mode.
+
+    Flags observed on the installed binary: `-p <prompt>` runs one prompt
+    non-interactively and `--output-format stream-json` emits
+    newline-delimited JSON. Kimi's prompt mode does not accept `--yolo` or
+    `--auto` (those are for interactive sessions), so the wrapper does not
+    pass either. There is no native `--json-schema` or timeout flag, so JSON
+    output is prompt-based (like Codex/Gemini) and the Python subprocess
+    timeout is the leash. The prompt travels via `-p` argv, not stdin, unlike
+    the other wrappers; OS argv limits are large enough for modelmesh prompts.
+    """
+
+    def run(self, prompt: str, schema: Optional[dict] = None) -> RunOutcome:
+        if not shutil.which("kimi"):
+            return self._missing_binary("kimi")
+        cmd = [
+            "kimi",
+            "-p", prompt,
+            "--output-format", "stream-json",
+            "--model", self.spec.model,
+        ]
+        # NOTE: `--yolo` / `--auto` are rejected by `kimi -p`. Prompt mode is
+        # Kimi's non-interactive path; tool/file edits are not available here.
+        outcome = _run(cmd, self.timeout, result_key="response",
+                       json_optional=True, cwd=self.workdir)
+        outcome.output = self._extract_assistant(outcome.output)
+        return outcome
+
+    @staticmethod
+    def _extract_assistant(stdout: str) -> str:
+        """Parse Kimi's NDJSON stream, keeping only assistant-role content
+        lines and dropping metadata such as session resume hints."""
+        pieces: list[str] = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and obj.get("role") == "assistant":
+                content = obj.get("content")
+                if isinstance(content, str):
+                    pieces.append(content)
+        return "\n".join(pieces)
 
 
 class MockAgent(Agent):
@@ -322,6 +402,7 @@ def build_agent(
         "claude": ClaudeCodeAgent,
         "codex": CodexAgent,
         "agy": AgyAgent,
+        "kimi": KimiAgent,
     }
     return provider_map[spec.provider](
         spec, timeout=timeout, max_turns=max_turns, workdir=workdir,

@@ -21,6 +21,7 @@ from typing import Optional
 from .agents import build_agent, clip
 from .config import (
     AgentSpec,
+    DECIDER_CONFIG,
     DispatchMode,
     MAX_FANOUT,
     MAX_QUALITY_RETRIES,
@@ -119,6 +120,16 @@ class Orchestrator:
                 self.tier_config[tier] = kept
         else:
             self.tier_config = TIER_CONFIG
+        # The clarify/review panel (see DECIDER_CONFIG). --providers narrows it
+        # the same way it narrows the tiers, so restricting a run to CLIs you
+        # actually have authenticated degrades the panel to the voters that
+        # remain rather than blowing up on a missing binary. A single-voter
+        # panel is just the old single-reviewer behavior, which is the right
+        # fallback. ORCHESTRATOR is claude-only and is validated above, so
+        # every runnable configuration keeps at least the claude voter.
+        self.decider_config: list[AgentSpec] = [
+            s for s in DECIDER_CONFIG if not providers or s.provider in providers
+        ] or [self.tier_config[Tier.ORCHESTRATOR][0]]
         # Bias routing toward one provider wherever it's configured at a tier
         # (e.g. --prefer codex to lean on an abundant ChatGPT quota). It
         # overrides the model's per-subtask routing but not failover, so the
@@ -225,26 +236,62 @@ class Orchestrator:
         )
         return result
 
+    def _vote(self, task: Task, prompt: str, schema: dict, parser, kind: str) -> list[dict]:
+        """Put one decision to the panel and return a parsed verdict per voter
+        that actually answered. Voters sit on different providers, so this
+        costs roughly one call of wall-clock rather than len(panel).
+
+        A voter that errors or answers unparseably ABSTAINS rather than
+        voting. "Both must agree" governs genuine disagreement between two
+        models that each reached a conclusion -- it is not a licence for a
+        dead CLI or a chatty reply to veto the run. When every voter abstains
+        the caller falls back to its own fail-open default, which is the
+        behavior that existed before the panel."""
+        calls = self._fanout([
+            (lambda s=spec: self._call(s, task, prompt, schema, kind=kind))
+            for spec in self.decider_config
+        ])
+        verdicts: list[dict] = []
+        for spec, call in zip(self.decider_config, calls):
+            who = f"{spec.provider}:{spec.model}"
+            if not call.success:
+                self._progress(f"{kind} voter {who} failed ({call.error}); abstaining")
+                continue
+            parsed = parser(call.output)
+            if parsed is None:
+                self._progress(f"{kind} voter {who} returned no parseable verdict; abstaining")
+                continue
+            verdicts.append(parsed)
+        return verdicts
+
     def _clarify(self, big_task: str) -> str:
-        """Pre-flight triage: one restricted reasoning call decides whether
-        the task is executable without guessing at intent. Materially
-        ambiguous + interactive terminal -> ask the operator (blank answer
-        adopts the stated default). Headless -> adopt the model's default
+        """Pre-flight triage: the decision panel decides whether the task is
+        executable without guessing at intent. Unanimity is required to
+        proceed -- if EITHER voter calls it ambiguous, we ask (their concerns
+        are pooled), because the cost of one unnecessary question is far
+        below the cost of dispatching a whole tree at the wrong target.
+
+        Materially ambiguous + interactive terminal -> ask the operator (blank
+        answer adopts the stated default). Headless -> adopt the default
         assumptions, print them to stderr, and fold them into the task as
-        binding constraints. A failed or unparseable triage never blocks."""
+        binding constraints. A panel that can't answer never blocks."""
         if not self.clarify:
             return big_task
-        spec = self.tier_config[Tier.ORCHESTRATOR][0]
         probe = Task(description=big_task, tier=Tier.ORCHESTRATOR)
-        call = self._call(spec, probe, clarify_prompt(big_task),
-                          schema=CLARIFY_SCHEMA, kind="clarify")
-        if not call.success:
-            self._progress("clarify call failed; proceeding with the task as given")
+        votes = self._vote(probe, clarify_prompt(big_task),
+                           CLARIFY_SCHEMA, parse_clarify, "clarify")
+        if not votes:
+            self._progress("no clarify verdict; proceeding with the task as given")
             return big_task
-        parsed = parse_clarify(call.output)
-        if parsed is None or parsed["clear"] or not parsed["questions"]:
+        flagged = [v for v in votes if not v["clear"] and v["questions"]]
+        if not flagged:
             return big_task
-        questions, assumptions = parsed["questions"], parsed["assumptions"]
+        if len(flagged) < len(votes):
+            self._progress(
+                f"clarify panel split ({len(flagged)}/{len(votes)} called it "
+                f"ambiguous); asking rather than assuming"
+            )
+        questions, assumptions = self._pool_questions(flagged)
         if sys.stdin.isatty() and sys.stdout.isatty():
             print(
                 "\nBefore dispatching, pin down intent (blank answer = "
@@ -269,8 +316,13 @@ class Orchestrator:
                 + "\n\nClarifications from the operator (binding):\n"
                 + "\n".join(lines)
             )
+        # Pooling can pair a question with no assumption (a voter that raised
+        # it offered no default), so test the slot's content, not just its
+        # presence -- otherwise the run adopts a literal "None" as a binding
+        # constraint.
         adopted = [
-            f"- {assumptions[i]}" if i < len(assumptions)
+            f"- {assumptions[i]}"
+            if i < len(assumptions) and assumptions[i]
             else f"- unresolved question, use best judgment: {q}"
             for i, q in enumerate(questions)
         ]
@@ -287,6 +339,36 @@ class Orchestrator:
               "result:\n"
             + "\n".join(adopted)
         )
+
+    @staticmethod
+    def _pool_questions(flagged: list[dict]) -> tuple[list[str], list[Optional[str]]]:
+        """Merge the flagging voters' questions into one index-paired
+        (questions, assumptions) pair, still capped at 3 so the operator
+        prompt stays bounded.
+
+        Round-robins across voters rather than concatenating, so a voter that
+        asked three things can't take every slot and silence the other one --
+        the whole reason for a second opinion is the concern the first model
+        didn't have. Dedupes case-insensitively, since two models flagging the
+        same ambiguity is the common case, not a coincidence."""
+        questions: list[str] = []
+        assumptions: list[Optional[str]] = []
+        seen: set[str] = set()
+        widest = max(len(v["questions"]) for v in flagged)
+        for i in range(widest):
+            for v in flagged:
+                if i >= len(v["questions"]):
+                    continue
+                q = v["questions"][i]
+                key = q.strip().lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                questions.append(q)
+                assumptions.append(
+                    v["assumptions"][i] if i < len(v["assumptions"]) else None
+                )
+        return questions[:3], assumptions[:3]
 
     def _retry_branches(
         self, root_result: TaskResult, failed_ids: list[str], issues: list[str]
@@ -392,25 +474,50 @@ class Orchestrator:
         return root_result
 
     def _review(self, big_task: str, result: TaskResult) -> dict:
-        spec = self.tier_config[Tier.ORCHESTRATOR][0]
+        """Post-synthesis quality gate, decided by the panel. Unanimity is
+        required to accept: if EITHER voter votes retry, the tree is
+        re-dispatched against the pooled issues. A single reviewer is a
+        single point of failure exactly where it hurts most -- unsupported
+        content that reads well is the failure a same-family second look is
+        least likely to catch, which is why the voters are cross-vendor."""
         # P2: the reviewer sees each slice's definition of done next to the
         # tail of that agent's report, so "claimed done, never ran the
         # check" is mechanically catchable -- and (P4) it can name the
         # specific slice ids that need redoing.
-        call = self._call(
-            spec, result.task,
+        votes = self._vote(
+            result.task,
             review_prompt(big_task, result.output,
                           verify_ledger_block=verify_ledger(result)),
-            schema=REVIEW_SCHEMA, kind="review",
+            REVIEW_SCHEMA, parse_review, "review",
         )
-        # A reviewer that failed or answered unparseably must not wedge the
-        # run into endless retries -- accept and note it.
-        if not call.success:
-            return {"verdict": "accept", "issues": [], "note": "review call failed; accepted unreviewed"}
-        parsed = parse_review(call.output)
-        if parsed is None:
-            return {"verdict": "accept", "issues": [], "note": "review verdict unparseable; accepted unreviewed"}
-        return parsed
+        # A panel that failed or answered unparseably must not wedge the run
+        # into endless retries -- accept and note it.
+        if not votes:
+            return {"verdict": "accept", "issues": [], "failed_task_ids": [],
+                    "note": "no review verdict; accepted unreviewed"}
+        dissent = [v for v in votes if v["verdict"] == "retry"]
+        if not dissent:
+            return {"verdict": "accept", "issues": [], "failed_task_ids": []}
+        # Pool what the dissenters actually objected to. Union, not
+        # intersection: a retry is already decided, so the retry prompt should
+        # carry every issue raised, including ones only one voter saw.
+        issues: list[str] = []
+        ids: list[str] = []
+        for v in dissent:
+            for issue in v["issues"]:
+                if issue not in issues:
+                    issues.append(issue)
+            for tid in v["failed_task_ids"]:
+                if tid not in ids:
+                    ids.append(tid)
+        verdict = {"verdict": "retry", "issues": issues, "failed_task_ids": ids}
+        if len(dissent) < len(votes):
+            verdict["note"] = (
+                f"review panel split ({len(dissent)}/{len(votes)} voted "
+                f"retry); took the stricter verdict"
+            )
+            self._progress(verdict["note"])
+        return verdict
 
     def cost_report(self) -> str:
         """P7: render the run's call ledger -- calls, outcomes, agent-time,

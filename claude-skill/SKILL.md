@@ -17,10 +17,12 @@ grep -rho "/[^']*ai-orchestrator[^']*" \
 ```
 
 ```
-ORCHESTRATOR  claude-fable-5
-MAIN          claude-opus-4-8 | gpt-5.5 | agy "Gemini 3.1 Pro (High)"
-SECOND        (engaged only for huge subtasks that need re-division)
-CODING        claude-sonnet-5 | gpt-5.4 | agy "Gemini 3.5 Flash (High)"
+ORCHESTRATOR  claude-opus-4-8 (dispatch + decompose)
+              decision panel: claude-fable-5 + gpt-5.6-sol, both must agree
+MAIN          claude-opus-4-8 | gpt-5.6-sol | kimi "K2.7 Code"
+SECOND        claude-opus-4-8 | gpt-5.6-terra | agy "Gemini 3.1 Pro (High)"
+              (engaged only for huge subtasks that need re-division)
+CODING        claude-sonnet-5 | gpt-5.6-luna | agy "Gemini 3.5 Flash (High)"
 ```
 
 It rides the user's existing `claude` / `codex` (ChatGPT) / `agy` (Antigravity)
