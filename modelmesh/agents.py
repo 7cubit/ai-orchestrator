@@ -1,10 +1,11 @@
 """Thin subprocess wrappers around the vendor CLIs.
 
 Each wrapper shells out to an *already installed, already logged-in* CLI --
-`claude`, `codex`, `agy` (Antigravity), or `kimi` (Kimi Code) -- using the
-subscription session created by `claude login` / `codex` (ChatGPT sign-in) /
-`agy` (Google sign-in) / `kimi login`. None of this talks to a pay-per-token
-API key; it rides the same seat you already pay for.
+`claude`, `codex`, `agy` (Antigravity), `kimi` (Kimi Code), or `grok`
+(Grok CLI) -- using the subscription session created by `claude login` /
+`codex` (ChatGPT sign-in) / `agy` (Google sign-in) / `kimi login` /
+`grok login`. None of this talks to a pay-per-token API key; it rides the
+same seat you already pay for.
 
 Flags below are accurate as of the docs pulled while building this scaffold,
 but all three CLIs ship updates fast. Anywhere you see `# VERIFY:` is worth
@@ -64,14 +65,16 @@ class Agent(ABC):
         # (bypassPermissions / --full-auto / --yolo) can't stomp each other's
         # files when children run in parallel. NOTE: for claude/agy/kimi this
         # is a starting cwd, not an OS-enforced boundary (audit MM-05) -- only
-        # codex's sandbox actually confines writes.
+        # codex's sandbox (and grok's workspace profile) actually confine
+        # writes.
         self.workdir = workdir
         # Least privilege (audit MM-01/MM-02): decompose/synthesize/review
         # calls only reason over text, so they run WITHOUT the vendor's
         # permission bypass -- restricted mode per provider, verified live:
         # claude default mode (read-only tools work, writes/bash are denied
         # headless), codex --sandbox read-only, agy --sandbox, kimi without
-        # --yolo. Only leaf coding work keeps the unattended bypass.
+        # --yolo, grok --sandbox read-only. Only leaf coding work keeps the
+        # unattended bypass.
         self.restricted = restricted
 
     @abstractmethod
@@ -97,10 +100,10 @@ class ClaudeCodeAgent(Agent):
             return self._missing_binary("claude")
         # The prompt goes in via stdin, never as an argv element, so a
         # model-generated task that starts with "-" can't be reparsed as a
-        # flag (argument injection). Codex does the same. agy and kimi have
-        # no stdin path and must take the prompt in argv, so they pin it to a
-        # single element (`--print=<prompt>` / `-p <prompt>`) to keep the
-        # same guarantee -- see their wrappers.
+        # flag (argument injection). Codex does the same. agy, kimi, and grok
+        # have no stdin path and must take the prompt in argv, so they pin it
+        # to a single element (`--print=<prompt>` / `-p <prompt>`) to keep
+        # the same guarantee -- see their wrappers.
         cmd = [
             "claude", "-p",
             "--model", self.spec.model,
@@ -271,6 +274,73 @@ class KimiAgent(Agent):
         return "\n".join(pieces)
 
 
+class GrokAgent(Agent):
+    """Wraps `grok -p` -- the Grok CLI's headless single-turn mode.
+
+    Flags verified against grok 0.2.102: `-p/--single <prompt>` runs one
+    prompt and exits, `--output-format json` emits a single JSON object whose
+    answer lives under "text" (with stopReason/num_turns/usage alongside),
+    and `--json-schema` natively constrains output like Claude Code's flag.
+    `--reasoning-effort` accepts exactly low|medium|high -- narrower than
+    ALLOWED_EFFORTS, so anything above clamps to "high", loudly (same
+    rationale as the codex clamp: the allowlist guards injection, the print
+    stops a silent downgrade).
+
+    There is no stdin prompt path, so like kimi/agy the prompt is pinned to
+    a single argv element (`-p <prompt>`) to keep the argument-injection
+    guard. Restricted calls run under the built-in `--sandbox read-only`
+    profile; coding work gets `--permission-mode bypassPermissions` with
+    `--sandbox workspace`, which confines writes to the call's cwd (pairing
+    with per-call workdir isolation, like codex's workspace-write)."""
+
+    _EFFORTS = {"low", "medium", "high"}
+
+    def run(self, prompt: str, schema: Optional[dict] = None) -> RunOutcome:
+        if not shutil.which("grok"):
+            return self._missing_binary("grok")
+        effort = self.spec.effort
+        if effort not in self._EFFORTS:
+            print(
+                f"modelmesh: {self.spec.model}: grok caps reasoning effort at "
+                f"'high' (asked for {effort!r}); clamping",
+                file=sys.stderr, flush=True,
+            )
+            effort = "high"
+        cmd = [
+            "grok",
+            "-p", prompt,
+            "--output-format", "json",
+            "--model", self.spec.model,
+            "--reasoning-effort", effort,
+            "--max-turns", str(self.max_turns),
+        ]
+        if self.restricted:
+            cmd += ["--sandbox", "read-only"]
+        else:
+            cmd += ["--permission-mode", "bypassPermissions",
+                    "--sandbox", "workspace"]
+        if schema is not None:
+            cmd += ["--json-schema", json.dumps(schema)]
+        outcome = _run(cmd, self.timeout, result_key="text",
+                       json_optional=True, cwd=self.workdir)
+        # Surface grok's in-band stop cause. Verified live: a turn-cap stop
+        # exits 1 with stopReason="Cancelled", which the generic path would
+        # flatten to "CLI reported failure (exit 1)" (grok's JSON has no
+        # subtype/error field for _json_failure_reason to find). Also treat
+        # a non-answer stopReason as failure even on exit 0, mirroring
+        # Claude Code's is_error handling, in case a future grok stops
+        # exiting non-zero for it.
+        if isinstance(outcome.raw, dict):
+            stop = outcome.raw.get("stopReason")
+            if isinstance(stop, str) and stop not in ("EndTurn", "StopSequence"):
+                outcome.success = False
+                reason = f"stopReason={stop}"
+                outcome.error = (
+                    f"{reason}: {outcome.error}" if outcome.error else reason
+                )
+        return outcome
+
+
 class MockAgent(Agent):
     """Stand-in used for --dry-run. Returns instantly so you can exercise the
     whole tree -- fan-out, aggregation, error paths -- with no installed
@@ -341,7 +411,7 @@ def _run_impl(
         )
     # MM-08: agents get an allowlisted env, not the operator's full shell
     # environment -- credentials living there are never handed to a spawned
-    # agent. All three CLIs auth from their own state under HOME.
+    # agent. All the vendor CLIs auth from their own state under HOME.
     env = {k: os.environ[k] for k in ENV_ALLOWLIST if k in os.environ}
     try:
         proc = subprocess.run(
@@ -403,6 +473,7 @@ def build_agent(
         "codex": CodexAgent,
         "agy": AgyAgent,
         "kimi": KimiAgent,
+        "grok": GrokAgent,
     }
     return provider_map[spec.provider](
         spec, timeout=timeout, max_turns=max_turns, workdir=workdir,

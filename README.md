@@ -1,7 +1,7 @@
 # modelmesh
 
 Hierarchical multi-model orchestration across **Claude Code**, **Codex CLI**,
-**Antigravity (`agy`)**, and **Kimi Code (`kimi`)** — riding your existing
+**Antigravity (`agy`)**, and **Grok CLI (`grok`)** — riding your existing
 subscriptions rather than API keys.
 
 ```
@@ -10,7 +10,7 @@ ORCHESTRATOR   claude-opus-4-8 (max)                                    <- dispa
       |        DECISION PANEL: claude-fable-5 (xhigh) + gpt-5.6-sol (xhigh)
       |        both must agree to proceed; either one can force ask/retry
       |
-MAIN           claude-opus-4-8 (max)  |  gpt-5.6-sol (max)   |  kimi: K2.7 Code (high)
+MAIN           claude-opus-4-8 (max)  |  gpt-5.6-sol (max)   |  grok-4.5 (high)
       |
 SECOND         claude-opus-4-8 (high) |  gpt-5.6-terra (high)|  agy: Gemini 3.1 Pro (High)
       |
@@ -31,6 +31,11 @@ The root **decompose** is deliberately *not* voted on: splitting a task into
 a tree is a plan, not a verdict, and two models can't "agree" on one without a
 reconciliation pass — which is what ENSEMBLE mode already does, at ENSEMBLE
 prices. Opus 4.8 owns that alone.
+
+The Kimi Code (`kimi`) wrapper is fully integrated but **unseated by
+default**: its subscription quota exhausts too quickly to survive tree
+fan-out (observed live). Re-seat it by adding its `AgentSpec` back in
+`TIER_CONFIG` — see the note there.
 
 A "big task" enters at ORCHESTRATOR and results synthesize back up the same
 path it was divided along. How deep the division goes is decided per subtask,
@@ -70,9 +75,11 @@ modelmesh "Refactor the billing module and add tests" --prefer codex
 
 - `--prefer codex` routes MAIN, SECOND, and CODING to the ChatGPT models
   (gpt-5.6-sol/terra at the planning tiers, gpt-5.6-luna at coding), overriding the
-  per-subtask strength routing. `--prefer kimi` leans on `kimi-code/kimi-for-coding`
-  (K2.7 Code) wherever it's configured, which is the MAIN tier. The
-  ORCHESTRATOR tier is Opus-4.8-only, so it is unaffected.
+  per-subtask strength routing. `--prefer grok` leans on `grok-4.5`
+  wherever it's configured, which is the MAIN tier. The ORCHESTRATOR tier
+  is Opus-4.8-only, so it is unaffected. (`--prefer` choices are derived
+  from `TIER_CONFIG`, so an unseated provider — kimi today — isn't
+  offered.)
 - **Failover still applies:** if the preferred provider times out or errors,
   the call falls over to the other providers as usual — so `--prefer` leans
   on a seat without becoming a single point of failure.
@@ -245,9 +252,9 @@ review call accepts-with-a-note instead of wedging the run into retries.
 
 ## Why this is buildable at all
 
-Claude Code, Codex CLI, the Antigravity CLI, and the Kimi Code CLI all
-officially support running headless off a personal subscription login instead
-of a metered API key:
+Claude Code, Codex CLI, the Antigravity CLI, the Kimi Code CLI, and the Grok
+CLI all officially support running headless off a personal subscription login
+instead of a metered API key:
 
 - Claude: `claude login`, then `claude -p "..." --model ... --effort ...`
 - Codex: sign in with your ChatGPT account on first run, then `codex exec ...`
@@ -256,9 +263,11 @@ of a metered API key:
   part of the model string, exactly as `agy models` lists it
 - Kimi: run `kimi login` to authenticate, then
   `kimi -p "..." --model kimi-code/kimi-for-coding --output-format stream-json`
+- Grok: run `grok login` (grok.com sign-in), then
+  `grok -p "..." --model grok-4.5 --output-format json`
 
 None of this reverse-engineers a web UI the way some "free API" tricks for
-consumer chat products do — these three are purpose-built CLIs designed for
+consumer chat products do — these are purpose-built CLIs designed for
 exactly this kind of scripted/agentic use. That said, "supported" isn't the
 same as "unlimited": see **Rate limits** below before you turn this loose.
 
@@ -283,8 +292,12 @@ cp claude-skill/SKILL.md ~/.claude/skills/modelmesh/SKILL.md
    - `codex` — `npm install -g @openai/codex`, then run `codex` once to sign in
    - `agy` — the Antigravity CLI; run `agy` once to sign in with your Google
      account, then `agy models` to see which models your seat serves
-   - `kimi` — the Kimi Code CLI; run `kimi login` to authenticate via the
-     device-code flow, then `kimi provider list` to confirm the default model
+   - `kimi` — the Kimi Code CLI (optional: unseated by default, see above);
+     run `kimi login` to authenticate via the device-code flow, then
+     `kimi provider list` to confirm the default model
+   - `grok` — the Grok CLI (https://docs.x.ai); run `grok login` to sign in
+     with your grok.com account, then `grok models` to confirm the seat
+     serves `grok-4.5`
 2. `pip install -e .` from this directory (or just run it in place — there
    are no third-party dependencies).
 3. Try it with no CLIs installed at all first:
@@ -331,7 +344,7 @@ by spinning up the whole tree.
 The project is wherever you're standing. Open a terminal inside a repo (or a
 VS Code terminal, which drops you there already) and every agent call runs
 with that directory as its cwd — same muscle memory as `claude`, `codex`,
-`agy`, and `kimi`:
+`agy`, `kimi`, and `grok`:
 
 ```bash
 cd ~/code/myapp && git checkout -b modelmesh/bugfix
@@ -419,19 +432,22 @@ review gate can only reject what the prompt lets it measure.
 modelmesh runs coding-tier agents unattended with their permission prompts
 disabled (`claude --permission-mode bypassPermissions`, `agy
 --dangerously-skip-permissions`, `codex --sandbox workspace-write`, `kimi
---yolo`). A self-audit (`docs/SECURITY_AUDIT.md`) documents the consequences;
-the hardening it drove, and what still stands:
+--yolo`, `grok --permission-mode bypassPermissions --sandbox workspace`). A
+self-audit (`docs/SECURITY_AUDIT.md`) documents the consequences; the
+hardening it drove, and what still stands:
 
 - **Least privilege by call kind (MM-01/02, MM-07).** Only leaf coding work
   runs with the permission bypass. Decompose/synthesize/review calls run
   restricted — claude in default mode (reads work headless, writes/bash are
   denied), `codex --sandbox read-only`, `agy --sandbox`, `kimi` without
-  `--yolo` — verified live against all four CLIs.
+  `--yolo`, `grok --sandbox read-only` — verified live against the installed
+  CLIs.
 - **Agents get an allowlisted environment, not your shell's (MM-08).**
   `ENV_ALLOWLIST` in `config.py` passes PATH/HOME/locale/proxy vars only;
   credentials like `ANTHROPIC_API_KEY` are stripped (verified with a canary
-  secret). All four CLIs authenticate from their own state under HOME. If
-  you want API-key burst billing, add the key to the allowlist deliberately.
+  secret). All the vendor CLIs authenticate from their own state under HOME.
+  If you want API-key burst billing, add the key to the allowlist
+  deliberately.
 - **The per-call working directory is still a starting cwd, not a sandbox,
   for the coding tier.** A bypassed coding agent can read/write outside it.
   Run against a branch, review the diff, and don't point `--project` at a
@@ -484,8 +500,10 @@ decompose and synthesis calls at every level above it. `--mode route` (the
 default) avoids this by picking one provider per node instead of all three, and
 `MAX_FANOUT` in `config.py` caps how wide any single node can branch — but
 even a disciplined tree that's 3-wide and 4 tiers deep is dozens of calls
-per run, and Opus/GPT-5.6-Sol/Gemini 3.1 Pro/K2.7 Code at high-to-max effort are
-not fast or cheap in tokens even when the seat itself is flat-rate.
+per run, and Opus/GPT-5.6-Sol/Gemini 3.1 Pro/Grok 4.5 at high-to-max effort
+are not fast or cheap in tokens even when the seat itself is flat-rate.
+(The Kimi seat was unseated for exactly this reason: its quota exhausted
+too quickly under fan-out.)
 
 Concretely, for Claude specifically: **1-3 agents at steady use is where a
 Max subscription is cheapest; 5+ concurrent agents will hit rate limits
@@ -495,8 +513,8 @@ billing for burst capacity. `PROVIDER_CONCURRENCY` in `config.py` defaults
 every provider to 1 concurrent call for exactly this reason — raise it only
 after you've watched a real run and know where your account's ceiling is.
 Codex (ChatGPT plan), Antigravity (rolling usage windows on the Google
-seat), and Kimi have the same shape of limit even though the exact numbers
-differ.
+seat), and Grok (grok.com plan) have the same shape of limit even though
+the exact numbers differ.
 
 **Practical starting point:** run in `--mode route` (one provider per node)
 until the plumbing is solid, and only reach for `--mode ensemble` on the
@@ -521,7 +539,7 @@ ensemble fan-out case above):
   failure even if it printed JSON, and child failures propagate to the root
   result instead of being papered over by a clean synthesis call
 
-All four wrappers are intended to be verified against live installed CLIs
+All five wrappers are intended to be verified against live installed CLIs
 (flags drift as these ship weekly — re-check `<cli> --help` after updates):
 
 The `codex` side is verified against codex-cli 0.142.5: `--full-auto` is
@@ -542,7 +560,8 @@ given model doesn't support, Claude Code silently falls back to the closest
 one it does — so the config's `"max"` requests are already safe on models
 that top out lower.
 
-The `kimi` side uses `kimi -p <prompt> --output-format stream-json`, with
+The `kimi` side (wrapper integrated, unseated from the default roster — see
+above) uses `kimi -p <prompt> --output-format stream-json`, with
 `--model kimi-code/kimi-for-coding` and `--yolo` for unattended coding work.
 The wrapper parses the newline-delimited JSON stream and keeps only
 `"role":"assistant"` content lines. There is no native CLI timeout, so the
@@ -550,14 +569,26 @@ Python subprocess timeout enforces the budget; there is no `--json-schema`
 flag, so structured output is prompt-based like Codex/Gemini. Re-check
 `kimi --help` after updates.
 
+The `grok` side is verified against grok 0.2.102: `grok -p <prompt>
+--output-format json` emits one JSON object with the answer under `"text"`
+and the stop cause under `"stopReason"` (a turn-cap stop exits 1 with
+`"Cancelled"`, which the wrapper surfaces as the failure reason). It has a
+native `--json-schema` flag like Claude Code, `--max-turns`, and
+`--reasoning-effort` capped at low|medium|high (the wrapper clamps higher
+config values to "high", loudly). Restricted calls run `--sandbox read-only`;
+coding work runs `--permission-mode bypassPermissions --sandbox workspace`,
+which confines writes to the call's cwd. Re-run `grok models` after updates —
+the seat currently serves only `grok-4.5`.
+
 ## An alternative worth knowing about: let Claude Code orchestrate natively
 
-This package treats all four CLIs symmetrically, as leaf subprocess calls
+This package treats all five CLIs symmetrically, as leaf subprocess calls
 under one Python dispatcher. There's a second, lower-effort architecture: run
 Opus 4.8 interactively (or via `claude -p`) as the actual orchestrator, give it
 Bash access, and let its own native subagent system (the `Task` tool) handle
 the Claude-side fan-out — with Python only stepping in at the points where a
-Claude subagent needs to shell out to `codex`, `agy`, or `kimi`. Claude Code
+Claude subagent needs to shell out to `codex`, `agy`, `kimi`, or `grok`.
+Claude Code
 already provides the agent loop, retries, and context isolation for the
 Claude tiers for free; you'd only be writing the Codex/Antigravity bridge, not the
 whole tree. Worth prototyping alongside this if you want to compare effort
@@ -567,7 +598,7 @@ before committing to one.
 
 - `modelmesh/tasks.py` — `Tier`, `Task`, `TaskResult`
 - `modelmesh/config.py` — the tier -> model/effort map, `MODEL_PROFILES` routing knowledge, concurrency & fan-out limits, review retry cap
-- `modelmesh/agents.py` — subprocess wrappers for `claude` / `codex` / `agy`, plus the dry-run mock
+- `modelmesh/agents.py` — subprocess wrappers for `claude` / `codex` / `agy` / `kimi` / `grok`, plus the dry-run mock
 - `modelmesh/prompts.py` — decompose/synthesize prompt templates + subtask parsing
 - `modelmesh/orchestrator.py` — the recursive dispatcher
 - `modelmesh/cli.py` — `python -m modelmesh "..."` entry point

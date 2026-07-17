@@ -19,14 +19,16 @@ grep -rho "/[^']*ai-orchestrator[^']*" \
 ```
 ORCHESTRATOR  claude-opus-4-8 (dispatch + decompose)
               decision panel: claude-fable-5 + gpt-5.6-sol, both must agree
-MAIN          claude-opus-4-8 | gpt-5.6-sol | kimi "K2.7 Code"
+MAIN          claude-opus-4-8 | gpt-5.6-sol | grok-4.5
 SECOND        claude-opus-4-8 | gpt-5.6-terra | agy "Gemini 3.1 Pro (High)"
               (engaged only for huge subtasks that need re-division)
 CODING        claude-sonnet-5 | gpt-5.6-luna | agy "Gemini 3.5 Flash (High)"
 ```
 
-It rides the user's existing `claude` / `codex` (ChatGPT) / `agy` (Antigravity)
-subscription logins — all three are authenticated on this machine. Routing is
+It rides the user's existing `claude` / `codex` (ChatGPT) / `agy`
+(Antigravity) / `grok` (grok.com) subscription logins. (A `kimi` wrapper
+exists but is unseated by default — its quota exhausts too fast for
+fan-out.) Routing is
 strength/cost-aware (MODEL_PROFILES in config.py), depth is adaptive (small
 subtasks skip straight to a coding agent), and a post-synthesis review gate
 rejects hallucinated reports and re-dispatches with feedback.
@@ -36,12 +38,12 @@ rejects hallucinated reports and re-dispatches with feedback.
 - USE: the user explicitly invokes it (/modelmesh <task>), or approves your
   suggestion for work that is genuinely orchestrator-sized: multi-hundred-file
   sweeps, full-repo audit reports, tasks that benefit from cross-checking
-  Claude vs GPT vs Gemini output.
+  Claude vs GPT vs Gemini vs Grok output.
 - DO NOT use for anything you can do well yourself in this session — normal
   coding, questions, single-file fixes, small refactors. The user does not
   want the orchestrator invoked for everything.
 - If a task seems borderline, do it yourself or ask one line: "This looks big
-  enough for modelmesh (~N calls across your three seats) — want me to fire
+  enough for modelmesh (~N calls across your seats) — want me to fire
   it?"
 
 ## How to call it
@@ -78,14 +80,14 @@ Key flags:
 - `--project <abs-path>` — target another repo without cd-ing there.
 - `--isolated` — no repo at all: each agent gets a scratch dir (use for
   purely generative tasks so agents never touch the user's cwd).
-- `--providers claude,codex,agy` — restrict which seats are used.
+- `--providers claude,codex,agy,grok` — restrict which seats are used.
 - `--dry-run` — free structural preview (stub responses, no tokens).
 - `--json` — machine-readable result tree (use when you need to parse).
 - `--max-fanout N` (default 3), `--timeout S` (per call, default 600),
   `--run-timeout S` (whole-run budget, default 3600, 0 = off),
   `--max-retries N` (review-gate re-dispatches, default 1), `--no-review`,
   `--no-clarify` (skip the pre-flight ambiguity triage),
-  `--prefer claude|codex|agy` (lean on one seat's quota),
+  `--prefer claude|codex|agy|grok` (lean on one seat's quota),
   `--mode ensemble` (all providers per node — 3x cost, only when the user
   wants cross-model verification).
 - Bare `modelmesh` opens a human REPL — never use that form from a session.

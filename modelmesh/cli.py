@@ -16,6 +16,7 @@ from .config import (
     MAX_FANOUT,
     MAX_QUALITY_RETRIES,
     RUN_TIMEOUT_SECONDS,
+    TIER_CONFIG,
 )
 from .orchestrator import Orchestrator
 from .tasks import TaskResult
@@ -117,9 +118,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                               "purely generative tasks)")
     parser.add_argument("--providers", default=None,
                          help="Comma-separated subset of providers to use, "
-                              "e.g. 'claude' if codex/agy/kimi aren't "
+                              "e.g. 'claude' if codex/agy/grok aren't "
                               "installed yet")
-    parser.add_argument("--prefer", default=None, choices=["claude", "codex", "agy", "kimi"],
+    # Derived from config, not hardcoded, so seating/unseating a provider in
+    # TIER_CONFIG is the whole change (an unseated provider would otherwise
+    # pass argparse and then die as an Orchestrator ValueError traceback).
+    parser.add_argument("--prefer", default=None,
+                         choices=sorted({s.provider for specs in
+                                         TIER_CONFIG.values() for s in specs}),
                          help="Bias routing toward one provider wherever it's "
                               "configured at a tier (e.g. --prefer codex to "
                               "lean on abundant ChatGPT quota). Overrides "

@@ -33,10 +33,10 @@ def _fence(content: str, label: str) -> str:
     return f'<untrusted_data source="{label}">\n{safe}\n</untrusted_data>'
 
 # Forces decomposition calls into strict JSON: the orchestrator passes this
-# to every decompose call, and ClaudeCodeAgent forwards it via
-# `claude --json-schema`. Codex/Gemini/Kimi accept and ignore it (JSON is
-# still requested in the prompt text below, and parse_subtasks degrades
-# gracefully).
+# to every decompose call; ClaudeCodeAgent forwards it via
+# `claude --json-schema` and GrokAgent via the same-named grok flag.
+# Codex/Gemini/Kimi accept and ignore it (JSON is still requested in the
+# prompt text below, and parse_subtasks degrades gracefully).
 SUBTASK_SCHEMA = {
     "type": "object",
     "properties": {
