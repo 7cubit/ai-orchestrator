@@ -15,7 +15,7 @@ from .tasks import Tier
 
 @dataclass(frozen=True)
 class AgentSpec:
-    provider: str   # "claude" | "codex" | "agy" | "kimi"
+    provider: str   # "claude" | "codex" | "agy" | "kimi" | "grok"
     model: str      # the CLI-facing model id/alias
     effort: str     # provider-specific reasoning/effort/thinking level
     speed: str = "medium"  # "fast" | "medium" | "slow" -- relative wall-clock;
@@ -39,12 +39,21 @@ class DispatchMode(Enum):
 # pass, which is what ENSEMBLE mode already is). The two verdict gates are
 # voted on instead; see DECIDER_CONFIG below.
 #
-# Each non-claude provider appears at exactly one tier, deliberately: kimi
+# Each non-claude provider appears at exactly one tier, deliberately: grok
 # carries MAIN, agy's Gemini 3.1 Pro re-divides at SECOND, and agy's Flash
 # does the cheap mechanical work at CODING. SECOND is only engaged for huge
 # subtasks that need re-dividing, which is precisely the whole-repo-digestion
 # case agy's context window is for -- so agy earns that seat on a strength no
-# terminal-agent benchmark measures.
+# terminal-agent benchmark measures. grok sits at MAIN because grok-4.5 is
+# the only model the grok.com seat serves (`grok models`), and it's a
+# frontier-tier generalist -- there's no cheaper sibling to send to CODING
+# nor a long-context specialist to send to SECOND.
+#
+# kimi is deliberately UNSEATED: the KimiAgent wrapper still works, but the
+# Kimi subscription's token quota exhausts too quickly to survive tree
+# fan-out (observed live, 2026-07). To re-seat it, add its AgentSpec back --
+# e.g. AgentSpec("kimi", "kimi-code/kimi-for-coding", "high", speed="medium")
+# at MAIN -- nothing else needs to change.
 TIER_CONFIG: dict[Tier, list[AgentSpec]] = {
     Tier.ORCHESTRATOR: [
         AgentSpec("claude", "claude-opus-4-8", "max", speed="slow"),
@@ -52,7 +61,7 @@ TIER_CONFIG: dict[Tier, list[AgentSpec]] = {
     Tier.MAIN: [
         AgentSpec("claude", "claude-opus-4-8", "max", speed="slow"),
         AgentSpec("codex", "gpt-5.6-sol", "max", speed="medium"),
-        AgentSpec("kimi", "kimi-code/kimi-for-coding", "high", speed="medium"),
+        AgentSpec("grok", "grok-4.5", "high", speed="medium"),
     ],
     Tier.SECOND: [
         AgentSpec("claude", "claude-opus-4-8", "high", speed="slow"),
@@ -92,6 +101,8 @@ DECIDER_CONFIG: list[AgentSpec] = [
 # - agy: "Gemini 3.1 Pro (High)" is exactly what `agy models` prints.
 # - kimi: "kimi-code/kimi-for-coding" is the installed alias for K2.7 Code;
 #   thinking is configured model-side, so the effort field documents intent.
+# - grok: --reasoning-effort is a real flag but only accepts low|medium|high;
+#   the wrapper clamps anything above to "high", loudly.
 
 @dataclass(frozen=True)
 class ModelProfile:
@@ -150,6 +161,9 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         ),
         cost="low (Gemini 3.5 Flash at the coding tier)",
     ),
+    # kimi's profile is kept for when it's re-seated (see TIER_CONFIG note);
+    # profiles are only injected for providers configured at a tier, so an
+    # unseated entry here is inert.
     "kimi": ModelProfile(
         strengths=(
             "Kimi K2.7 Code: strong coding and long-context work "
@@ -158,9 +172,24 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         ),
         weaknesses=(
             "smaller ecosystem of verified agentic benchmarks than Claude; "
-            "prompt-mode output is less structured than Claude Code JSON"
+            "prompt-mode output is less structured than Claude Code JSON; "
+            "subscription quota exhausts quickly under fan-out"
         ),
         cost="medium (Kimi K2.7 Code at the coding tier)",
+    ),
+    "grok": ModelProfile(
+        strengths=(
+            "Grok 4.5: frontier-tier generalist reasoning and coding, fast "
+            "for its class, built-in web search for questions that need "
+            "current information; native structured output (--json-schema) "
+            "like Claude Code"
+        ),
+        weaknesses=(
+            "single model on the seat (no cheap sibling for bulk mechanical "
+            "edits); reasoning effort caps at 'high'; less proven on very "
+            "long agentic chains than Claude"
+        ),
+        cost="medium (grok-4.5 is the seat's only model)",
     ),
 }
 
@@ -174,6 +203,7 @@ PROVIDER_CONCURRENCY: dict[str, int] = {
     "codex": 1,
     "agy": 1,
     "kimi": 1,
+    "grok": 1,
 }
 
 # Hard cap on how many subtasks any single node is allowed to spawn. Without
@@ -210,8 +240,8 @@ RUN_TIMEOUT_SECONDS = 3600
 # MM-08: spawned agents get this env allowlist instead of the full parent
 # environment, so credentials in the operator's shell (ANTHROPIC_API_KEY,
 # cloud tokens, ...) are never visible to permission-bypassed agents. All
-# three CLIs authenticate from their own state under HOME, verified live. If
-# you *want* API-key burst billing, add the key name here deliberately.
+# the vendor CLIs authenticate from their own state under HOME, verified
+# live. If you *want* API-key burst billing, add the key name deliberately.
 ENV_ALLOWLIST = [
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM",
     "LANG", "LC_ALL", "TZ",
